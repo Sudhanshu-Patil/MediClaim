@@ -177,6 +177,33 @@ how many documents you've ingested — with only the one sample policy it's
 ~150, so keep `--medquad` modest (e.g. 300–500) to avoid drowning the citation
 behavior, or ingest more documents first.
 
+## 9. Ask the agent (roadmap step 4 — LangGraph)
+
+Needs the fine-tuned model served via Ollama (§8), or any Ollama endpoint in
+`LLM_BASE_URL`/`LLM_MODEL`.
+
+```bash
+python scripts/ask.py "What is the copay for an MRI of the brain?"
+```
+
+Graph: router (vector/graph/hybrid heuristic) → hybrid retrieval (§7) →
+schema-constrained generation (JSON answer + chunk_id citations, Ollama JSON
+mode) → citation validation → LLM-as-judge → risk gate. Failed validation,
+judge score < `JUDGE_THRESHOLD`, or a high-risk query pattern pauses the run
+with a LangGraph `interrupt()` and prints a review packet:
+
+```bash
+python scripts/ask.py --resume <thread_id> --verdict approved
+python scripts/ask.py --resume <thread_id> --verdict edited --answer "..." --note "..."
+python scripts/ask.py --resume <thread_id> --verdict rejected --note "..."
+```
+
+Checkpointing uses Redis when `langgraph-checkpoint-redis` is installed
+(paused reviews survive restarts); otherwise an in-memory saver (dev only —
+resume must happen in the same process). The LLM client has a circuit
+breaker: 3 consecutive failures open the circuit for 30 s (fail fast instead
+of stacking timeouts, README §12).
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging
