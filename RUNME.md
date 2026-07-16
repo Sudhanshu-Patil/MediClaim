@@ -145,6 +145,38 @@ low-memory machines set `RERANKER_MODEL=Xenova/ms-marco-MiniLM-L-6-v2`
 degrades to fused order and marks results `reranked=false` — loudly, never
 silently.
 
+## 8. Fine-tuning (roadmap step 1 — QLoRA on free Colab T4)
+
+Trains a LoRA adapter on Llama 3.2 3B Instruct, merges it, converts to GGUF,
+and serves it locally via Ollama. Training runs on Colab (GPU); only the
+dataset build runs on your laptop.
+
+```bash
+# 1. Build the instruction dataset from the ingested policy chunks + MedQuad
+#    (stack must be up so the citation examples use real chunk_ids):
+python finetuning/build_dataset.py --medquad 2000
+#    -> finetuning/data/{train,val}.jsonl  (commit these)
+
+# 2. Train + convert on Colab:
+#    open notebooks/colab_qlora.ipynb, set runtime to T4 GPU, run all cells.
+#    Requires HF access to meta-llama/Llama-3.2-3B-Instruct (gated, free) and
+#    an HF write token. Pushes the q4_K_M GGUF to your HF Hub repo.
+
+# 3. Deploy locally:
+huggingface-cli download <you>/medclaim-llama3.2-3b-gguf \
+    medclaim-llama3.2-3b-q4_K_M.gguf --local-dir finetuning/models
+ollama create medclaim-llm -f finetuning/Modelfile
+ollama run medclaim-llm
+```
+
+**Dataset composition** — two families the model must tell apart: RAG turns
+with `CONTEXT` blocks train JSON `{"answer", "citations":[chunk_id...]}`
+output (including refusals when context can't answer); context-free MedQuad
+turns train plain-text medical answers. The citation-example count scales with
+how many documents you've ingested — with only the one sample policy it's
+~150, so keep `--medquad` modest (e.g. 300–500) to avoid drowning the citation
+behavior, or ingest more documents first.
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging
