@@ -1,0 +1,120 @@
+# MedClaim-Agentic-RAG — Phase 1 infrastructure
+#
+# Services: Qdrant (vectors), Neo4j Community (graph), Redis (cache + Celery
+# broker), Langfuse (self-hosted tracing) + its Postgres.
+#
+# Langfuse note: this uses Langfuse v2 (single container + Postgres). v3
+# additionally requires ClickHouse, MinIO and a worker container — overkill for
+# a local-first stack. Swap the image and add those services if you need v3.
+#
+# All credentials come from .env (copy .env.example → .env first).
+
+name: medclaim-agentic-rag
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.0
+    container_name: medclaim-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"   # REST
+      - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # Qdrant's image ships no curl/wget; bash /dev/tcp probe against REST port.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: medclaim-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-medclaim-local-dev}"
+      # Lean footprint so the whole stack + Docling fits on an 8 GB laptop;
+      # raise these for the 100k-doc load test.
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-256m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-256m}
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"    # Browser UI
+      - "${NEO4J_BOLT_PORT:-7687}:7687"    # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7474 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: medclaim-redis
+    restart: unless-stopped
+    # AOF so queued Celery jobs and HITL checkpoints survive restarts;
+    # noeviction so the broker never silently drops jobs under memory pressure.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: medclaim-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-change-me-langfuse-db}
+      POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
+    volumes:
+      - langfuse_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER:-langfuse} -d ${LANGFUSE_DB_NAME:-langfuse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: medclaim-langfuse
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: "postgresql://${LANGFUSE_DB_USER:-langfuse}:${LANGFUSE_DB_PASSWORD:-change-me-langfuse-db}@langfuse-db:5432/${LANGFUSE_DB_NAME:-langfuse}"
+      NEXTAUTH_URL: "http://localhost:${LANGFUSE_PORT:-3000}"
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-generate-a-real-secret}
+      SALT: ${LANGFUSE_SALT:-change-me-generate-a-real-salt}
+      TELEMETRY_ENABLED: "false"
+    healthcheck:
+      # Next.js standalone binds to the container hostname's interface, not
+      # loopback — 127.0.0.1 is refused, so probe via $(hostname).
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+volumes:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  langfuse_pg_data:

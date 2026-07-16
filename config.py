@@ -1,0 +1,78 @@
+"""Central environment-driven settings for the MedClaim ingestion pipeline.
+
+Everything is read from the environment (with .env support) so the same code
+runs on a laptop, in Docker, or in CI without edits. Import via:
+
+    from config import get_settings
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from functools import lru_cache
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Windows: huggingface_hub's default symlink cache needs Developer Mode /
+# admin rights (WinError 1314 otherwise). Copying instead costs some disk but
+# always works — model downloads (Docling TableFormer, bge-base) depend on it.
+if os.name == "nt":
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+
+
+def _env(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class Settings:
+    # Qdrant
+    qdrant_url: str = field(default_factory=lambda: _env("QDRANT_URL", "http://localhost:6333"))
+    qdrant_collection: str = field(default_factory=lambda: _env("QDRANT_COLLECTION", "medclaim_chunks"))
+
+    # Neo4j
+    neo4j_uri: str = field(default_factory=lambda: _env("NEO4J_URI", "bolt://localhost:7687"))
+    neo4j_user: str = field(default_factory=lambda: _env("NEO4J_USER", "neo4j"))
+    neo4j_password: str = field(default_factory=lambda: _env("NEO4J_PASSWORD", "medclaim-local-dev"))
+
+    # Redis / Celery
+    redis_url: str = field(default_factory=lambda: _env("REDIS_URL", "redis://localhost:6379/0"))
+    celery_broker_url: str = field(default_factory=lambda: _env("CELERY_BROKER_URL", "redis://localhost:6379/1"))
+    celery_result_backend: str = field(default_factory=lambda: _env("CELERY_RESULT_BACKEND", "redis://localhost:6379/2"))
+    l3_embedding_cache_ttl: int = field(default_factory=lambda: _env_int("L3_EMBEDDING_CACHE_TTL", 0))
+
+    # Embeddings
+    embedding_model: str = field(default_factory=lambda: _env("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+    embedding_dim: int = field(default_factory=lambda: _env_int("EMBEDDING_DIM", 768))
+    embed_batch_size: int = field(default_factory=lambda: _env_int("EMBED_BATCH_SIZE", 96))
+
+    # Chunking (README §5: 512–1024 tokens, 10–20% overlap)
+    chunk_min_tokens: int = field(default_factory=lambda: _env_int("CHUNK_MIN_TOKENS", 512))
+    chunk_max_tokens: int = field(default_factory=lambda: _env_int("CHUNK_MAX_TOKENS", 1024))
+    chunk_target_tokens: int = field(default_factory=lambda: _env_int("CHUNK_TARGET_TOKENS", 768))
+    chunk_overlap_tokens: int = field(default_factory=lambda: _env_int("CHUNK_OVERLAP_TOKENS", 100))
+    parent_max_tokens: int = field(default_factory=lambda: _env_int("PARENT_MAX_TOKENS", 3072))
+
+    # GraphRAG scoping (README §3)
+    graph_scoped_source_types: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            s.strip()
+            for s in _env("GRAPH_SCOPED_SOURCE_TYPES", "policy,clinical_guideline").split(",")
+            if s.strip()
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

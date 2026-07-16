@@ -1,0 +1,25 @@
+# MedClaim-Agentic-RAG — Phase 1 (ingestion pipeline) dependencies.
+# Python 3.10–3.12 recommended.
+
+# Parsing (IBM Docling + TableFormer table-structure model)
+docling>=2.15,<3
+
+# Schema / config
+pydantic>=2.7
+python-dotenv>=1.0
+
+# Stores & queue
+qdrant-client>=1.12
+neo4j>=5.24
+redis>=5.0
+celery>=5.4
+
+# Embeddings — ONNX CPU runtime, no torch needed for ingestion
+fastembed>=0.4
+numpy>=1.26
+
+# Token counting (chunker falls back to a heuristic if unavailable/offline)
+tiktoken>=0.7
+
+# Dev-only: generates the sample test PDF in scripts/generate_sample_pdf.py
+reportlab>=4.1

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+sample_docs/*.pdf
+.mypy_cache/
+.pytest_cache/

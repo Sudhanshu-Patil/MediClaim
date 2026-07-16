@@ -1,0 +1,160 @@
+# RUNME — Phase 1: Infrastructure + Document Ingestion Pipeline
+
+This phase delivers the Docker stack (Qdrant, Neo4j, Redis, Langfuse) and the
+async ingestion pipeline: Docling parse → version check → hierarchical chunk →
+metadata → cross-reference edges → L3-cached embedding → Qdrant + Neo4j upsert.
+
+## Prerequisites
+
+- Docker Desktop (running)
+- Python 3.10–3.12
+- ~3 GB free disk (Docling's TableFormer/layout models + the bge-base
+  embedding model download automatically on first run — internet needed once)
+
+## 1. Bring up the stack
+
+```bash
+cp .env.example .env        # then change the "change-me" values
+docker compose up -d
+docker compose ps           # wait until every service is "healthy"
+```
+
+| Service  | URL                     | Notes                                        |
+|----------|-------------------------|----------------------------------------------|
+| Qdrant   | http://localhost:6333/dashboard | vector store                          |
+| Neo4j    | http://localhost:7474   | login `neo4j` / your `NEO4J_PASSWORD`        |
+| Redis    | localhost:6379          | L3 embedding cache + Celery broker           |
+| Langfuse | http://localhost:3000   | create an account + project on first visit; put the project keys in `.env` (used from Phase 4) |
+
+> Langfuse runs as **v2** (single container + Postgres). v3 additionally
+> requires ClickHouse/MinIO/worker containers; swap in later if needed.
+
+## 2. Install Python dependencies
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows   (Linux/macOS: source .venv/bin/activate)
+pip install -r requirements.txt
+```
+
+## 3. Generate the sample test PDF
+
+A 5-page policy document with numbered sections, "see Section X.X"
+cross-references, and a 45-row fixed-column reimbursement table that spans
+multiple pages:
+
+```bash
+python scripts/generate_sample_pdf.py
+```
+
+## 4. Run a test ingestion
+
+**Quick path (no worker, pipeline runs in-process):**
+
+```bash
+python scripts/ingest.py sample_docs/sample_policy.pdf --source-type policy --sync
+```
+
+**Async path (production-shaped, via Celery):**
+
+```bash
+# terminal 1 — worker (from the repo root; --pool=solo is required on Windows)
+celery -A ingestion.tasks worker --loglevel=info --pool=solo
+
+# terminal 2 — enqueue
+python scripts/ingest.py sample_docs/sample_policy.pdf --source-type policy
+```
+
+First run is slow (model downloads + TableFormer inference); repeat runs are
+fast. The result JSON reports chunk counts, table chunks, REFERENCES edges,
+and L3 embedding-cache hits/misses.
+
+## 5. Verify
+
+**Qdrant** — active chunks with payloads:
+
+```bash
+curl http://localhost:6333/collections/medclaim_chunks
+curl -X POST http://localhost:6333/collections/medclaim_chunks/points/scroll \
+  -H "Content-Type: application/json" \
+  -d '{"filter":{"must":[{"key":"chunk_type","match":{"value":"table"}}]},"limit":3,"with_payload":true}'
+```
+
+**Neo4j** — open http://localhost:7474 and run:
+
+```cypher
+MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk) RETURN d.file_name, d.version, count(c);
+MATCH (a:Chunk)-[r:REFERENCES]->(b:Chunk) RETURN a.section_title, r.raw_text, b.section_title;
+MATCH (s:Chunk)-[:SUMMARIZES]->(t:Chunk) RETURN s.text, t.section_title;
+```
+
+**Redis L3 cache** — embedding entries present:
+
+```bash
+docker exec medclaim-redis redis-cli --scan --pattern "l3:emb:*" | head
+```
+
+## 6. Exercise the freshness / supersede logic
+
+```bash
+# 1. Re-ingest the identical file → action: "skipped_unchanged", zero work done
+python scripts/ingest.py sample_docs/sample_policy.pdf --sync
+
+# 2. Generate version 2 (changed MRI benefit, one extra table row) and ingest
+python scripts/generate_sample_pdf.py --version 2
+python scripts/ingest.py sample_docs/sample_policy.pdf --sync
+```
+
+The second ingest reports `action: "changed"`, `doc_version: 2`, and
+`superseded: <doc_id>:v1`. Verify in Neo4j:
+
+```cypher
+MATCH (new:Document)-[:SUPERSEDES]->(old:Document)
+RETURN new.uid, new.status, old.uid, old.status;   // old is status: superseded
+```
+
+and in Qdrant (old chunks kept for audit, excluded by the default filter):
+
+```bash
+curl -X POST http://localhost:6333/collections/medclaim_chunks/points/count \
+  -H "Content-Type: application/json" \
+  -d '{"filter":{"must":[{"key":"status","match":{"value":"superseded"}}]},"exact":true}'
+```
+
+Unchanged prose between v1 and v2 also shows up as `embedding_cache_hits > 0`
+— the Redis L3 cache skipping re-embedding (README §6).
+
+## Troubleshooting
+
+- **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging
+  file is too small")**: Docling's layout + TableFormer models need roughly
+  2 GB of free memory during parsing. On an 8 GB machine, close other apps
+  and stop unrelated containers, or enlarge the Windows page file (System →
+  Advanced → Performance → Virtual memory). The parser also auto-falls back
+  to the lighter pypdfium2 backend when the default docling-parse backend
+  fails (a known Docling issue,
+  https://github.com/docling-project/docling/issues/3671). OCR is disabled by
+  default (`DOCLING_DO_OCR=0`) to save several hundred MB — turn it on for
+  scanned documents.
+- **`bad allocation` from onnxruntime while loading the embedding model**:
+  same memory pressure. Switch `.env` to `EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`
+  and `EMBEDDING_DIM=384` (delete the Qdrant collection first if it was
+  created at 768: `curl -X DELETE http://localhost:6333/collections/medclaim_chunks`).
+- **Segfault when loading TableFormer right after an earlier crashed run**:
+  a partially-downloaded model cache. Delete
+  `%USERPROFILE%\.cache\huggingface\hub\models--docling-project--docling-models`
+  and rerun.
+- **Celery on Windows** hangs without `--pool=solo`.
+- **`neo4j` unhealthy at first**: it takes ~30–40 s to boot; the healthcheck
+  allows for this. Check `docker compose logs neo4j`.
+- **tiktoken offline**: the chunker falls back to a word-count token estimate
+  automatically; behavior is otherwise identical.
+- **Port collisions**: every published port is overridable in `.env`
+  (`QDRANT_HTTP_PORT`, `NEO4J_HTTP_PORT`, `LANGFUSE_PORT`, `REDIS_PORT`, ...).
+  A telltale Redis symptom: `AuthenticationError: HELLO must be called ...`
+  usually means another (password-protected) Redis from a different project
+  already owns port 6379 — set `REDIS_PORT=6380` and update `REDIS_URL` /
+  `CELERY_*` in `.env` to match. Also check `docker port medclaim-redis`
+  actually shows a host binding: a container first created while the port was
+  taken can end up running with no published port until you
+  `docker compose up -d --force-recreate redis`.

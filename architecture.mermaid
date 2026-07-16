@@ -1,0 +1,60 @@
+flowchart TD
+
+    subgraph UPLOAD["📥 Document Ingestion Pipeline (Async, Celery + Redis Queue)"]
+        U1[New Document Upload<br/>PDF / DOCX / PPTX] --> U2[Docling Parser<br/>TableFormer for multi-page<br/>and complex tables]
+        U2 --> U3{doc_id + content_hash<br/>already exists?}
+        U3 -- "Yes, unchanged" --> U3X[Skip re-ingestion]
+        U3 -- "Yes, changed version" --> U4V[Mark old chunks<br/>status: superseded<br/>superseded_by: new_doc_id]
+        U3 -- "New document" --> U5[Hierarchical Chunking<br/>parent/child + sentence-window<br/>512-1024 tok, 10-20% overlap<br/>Tables kept atomic]
+        U4V --> U5
+        U5 --> U6[Attach Metadata:<br/>chunk_id, doc_id, doc_version,<br/>section_title, page/slide_no,<br/>bbox, source_type, effective_date,<br/>status, doc_hash, ingestion_ts]
+        U6 --> U7[Cross-reference Detection<br/>e.g. 'see section 4.2' →<br/>static REFERENCES edges]
+        U7 --> U8{Embedding cached?<br/>Redis L3: chunk_hash → vector}
+        U8 -- Hit --> U10
+        U8 -- Miss --> U9[Batch Embed<br/>bge-base, async batches]
+        U9 --> U10[Batch Upsert]
+        U10 --> QDB[(Qdrant<br/>Vector Store<br/>HNSW + quantization)]
+        U7 --> GDB[(Neo4j<br/>Knowledge Graph<br/>GraphRAG - scoped to<br/>policy/guideline docs)]
+    end
+
+    subgraph QUERY["🔎 Query-Time Agentic RAG Pipeline (LangGraph)"]
+        Q1[User Query] --> Q2[Guardrails: Input Check<br/>PII / jailbreak / toxicity]
+        Q2 --> Q3{Redis L1 exact-match /<br/>L2 semantic cache hit?<br/>keyed on doc_version_state}
+        Q3 -- Hit --> Q3R[Return Cached Answer]
+        Q3 -- Miss --> Q4[LangGraph Router Node]
+        Q4 --> Q5V[Vector Retriever<br/>Qdrant, filter status=active]
+        Q4 --> Q5G[Graph Retriever<br/>Neo4j Cypher, filter status=active]
+        Q5V --> Q6[Cross-Encoder Reranker<br/>bge-reranker-base]
+        Q5G --> Q6
+        Q6 --> Q7[Fine-tuned LLM Generator<br/>Llama 3.1 8B QLoRA<br/>served locally via Ollama]
+        Q7 <--> MCP[MCP Server Tools:<br/>resolve_reference,<br/>policy-lookup, claim-DB query,<br/>fraud-flag — capped 1-2 calls]
+        Q7 --> Q8[Emit answer + cited chunk_ids]
+        Q8 --> Q9[Grounding Check<br/>NLI/entailment model verifies<br/>each sentence vs cited chunk]
+        Q9 --> Q10[LLM-as-Judge<br/>scores faithfulness/relevance]
+        Q10 --> Q11{High-risk claim<br/>or low judge score?}
+        Q11 -- Yes --> Q12[HITL: LangGraph interrupt<br/>checkpointed in Redis<br/>human reviewer approves/edits]
+        Q11 -- No --> Q13
+        Q12 --> Q13[Guardrails: Output Check<br/>schema validation, hallucination flag]
+        Q13 --> Q14[Response with grouped<br/>multi-doc citations +<br/>bbox/page highlighting]
+        Q14 --> Q15[Cache result → Redis L1/L2]
+    end
+
+    subgraph OBS["📊 Cross-Cutting: Observability & Evaluation"]
+        OBS1[LangSmith<br/>dev-time tracing]
+        OBS2[Langfuse - self-hosted<br/>persistent traces, cost/latency]
+        OBS3[RAGAS - offline eval<br/>faithfulness, context precision/recall,<br/>answer relevance — pre/post fine-tune<br/>and pre/post GraphRAG]
+        OBS4[MLflow<br/>fine-tuning experiment tracking]
+    end
+
+    QDB -.-> Q5V
+    GDB -.-> Q5G
+    Q1 -.trace.-> OBS1
+    Q1 -.trace.-> OBS2
+    U1 -.log.-> OBS4
+    Q14 -.eval.-> OBS3
+
+    style U1 fill:#e8f4fd
+    style Q1 fill:#e8f4fd
+    style Q3R fill:#d4f4dd
+    style Q12 fill:#fff3cd
+    style Q14 fill:#d4f4dd
