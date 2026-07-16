@@ -57,6 +57,23 @@ def main() -> None:
     )
     print(f"train={len(dataset['train'])} val={len(dataset['validation'])}")
 
+    # Render the chat template ourselves into a plain "text" field instead of
+    # relying on TRL's conversational auto-detection — TRL changed that
+    # behavior across 0.11/0.12/0.15, and Colab's preinstalled version varies.
+    # A prerendered text column trains identically on all of them.
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    def render(example):
+        return {
+            "text": tokenizer.apply_chat_template(
+                example["messages"], tokenize=False, add_generation_prompt=False
+            )
+        }
+
+    dataset = dataset.map(render, remove_columns=["messages"])
+
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -70,10 +87,6 @@ def main() -> None:
         attn_implementation="sdpa",
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
-
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
 
     lora_config = LoraConfig(
         r=args.lora_r,
@@ -98,6 +111,7 @@ def main() -> None:
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         max_seq_length=args.max_seq_len,
+        dataset_text_field="text",
         packing=False,
         fp16=True,
         optim="paged_adamw_8bit",
