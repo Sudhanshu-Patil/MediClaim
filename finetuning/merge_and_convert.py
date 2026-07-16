@@ -40,6 +40,9 @@ def merge(base_model: str, adapter: str, merged_dir: Path) -> None:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     print(f"Loading base {base_model} (fp16) and adapter {adapter} …")
+    # Tokenizer first: if the run dies mid-model-save, the completeness check
+    # below (which requires weight shards) still correctly re-runs the merge.
+    AutoTokenizer.from_pretrained(adapter).save_pretrained(merged_dir)
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.float16, device_map="cpu",
         low_cpu_mem_usage=True,
@@ -47,8 +50,14 @@ def merge(base_model: str, adapter: str, merged_dir: Path) -> None:
     model = PeftModel.from_pretrained(model, adapter)
     model = model.merge_and_unload()
     model.save_pretrained(merged_dir, safe_serialization=True)
-    AutoTokenizer.from_pretrained(adapter).save_pretrained(merged_dir)
     print(f"Merged model saved to {merged_dir}")
+
+
+def merge_is_complete(merged_dir: Path) -> bool:
+    """Weights + tokenizer present — config.json alone is NOT completion."""
+    has_weights = any(merged_dir.glob("model*.safetensors"))
+    has_tokenizer = (merged_dir / "tokenizer.json").exists()
+    return (merged_dir / "config.json").exists() and has_weights and has_tokenizer
 
 
 def ensure_llama_cpp() -> None:
@@ -74,7 +83,17 @@ def convert_and_quantize(merged_dir: Path, out_dir: Path, quant: str) -> Path:
     run([str(LLAMA_CPP_DIR / "build" / "bin" / "llama-quantize"),
          str(f16_path), str(quant_path), quant])
     f16_path.unlink()  # keep only the deployable quant (saves ~6 GB disk)
-    print(f"Quantized GGUF: {quant_path}")
+
+    # A 3B q4 GGUF is ~2 GB. A tiny file means the converter found no weight
+    # tensors (e.g. half-merged model dir) — never ship that.
+    size_mb = quant_path.stat().st_size / (1 << 20)
+    if size_mb < 500:
+        raise RuntimeError(
+            f"{quant_path.name} is only {size_mb:.1f} MiB — the conversion "
+            "exported no model weights. Delete the merged dir and re-run so "
+            "the merge actually executes."
+        )
+    print(f"Quantized GGUF: {quant_path} ({size_mb:.0f} MiB)")
     return quant_path
 
 
@@ -104,7 +123,7 @@ def main() -> None:
     args = parser.parse_args()
 
     merged_dir = Path(args.merged_dir)
-    if not (merged_dir / "config.json").exists():
+    if not merge_is_complete(merged_dir):
         merge(args.base_model, args.adapter, merged_dir)
     ensure_llama_cpp()
     gguf_path = convert_and_quantize(merged_dir, Path(args.out_dir), args.quant)
