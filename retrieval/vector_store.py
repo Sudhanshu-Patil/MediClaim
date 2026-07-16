@@ -115,7 +115,58 @@ class QdrantStore:
             "Marked chunks of %s v%d superseded by %s", doc_id, doc_version, superseded_by
         )
 
-    # ── Reads (verification / later phases) ────────────────────────────────
+    # ── Query-time reads ────────────────────────────────────────────────────
+    def search(
+        self,
+        query_vector: Sequence[float],
+        top_n: int = 20,
+        status: str = "active",
+        chunk_types: Optional[Sequence[str]] = None,
+        source_type: Optional[str] = None,
+        doc_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Vector search, excluding superseded chunks by default (README §3).
+
+        Returns [{chunk_id, score, payload}, ...] best-first.
+        """
+        must: list[qm.Condition] = [
+            qm.FieldCondition(key="status", match=qm.MatchValue(value=status))
+        ]
+        if chunk_types:
+            must.append(
+                qm.FieldCondition(key="chunk_type", match=qm.MatchAny(any=list(chunk_types)))
+            )
+        if source_type:
+            must.append(
+                qm.FieldCondition(key="source_type", match=qm.MatchValue(value=source_type))
+            )
+        if doc_id:
+            must.append(qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)))
+
+        result = self.client.query_points(
+            collection_name=self.collection,
+            query=list(query_vector),
+            query_filter=qm.Filter(must=must),
+            limit=top_n,
+            with_payload=True,
+        )
+        return [
+            {"chunk_id": str(p.id), "score": p.score, "payload": p.payload}
+            for p in result.points
+        ]
+
+    def retrieve(self, chunk_ids: Sequence[str]) -> dict[str, dict]:
+        """Fetch payloads by ID (used for graph-only hits after fusion)."""
+        if not chunk_ids:
+            return {}
+        points = self.client.retrieve(
+            collection_name=self.collection,
+            ids=list(chunk_ids),
+            with_payload=True,
+        )
+        return {str(p.id): p.payload for p in points}
+
+    # ── Verification helpers ────────────────────────────────────────────────
     def count(self, doc_id: Optional[str] = None, status: Optional[str] = None) -> int:
         must = []
         if doc_id:

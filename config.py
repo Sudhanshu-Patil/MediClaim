@@ -63,6 +63,15 @@ class Settings:
     chunk_overlap_tokens: int = field(default_factory=lambda: _env_int("CHUNK_OVERLAP_TOKENS", 100))
     parent_max_tokens: int = field(default_factory=lambda: _env_int("PARENT_MAX_TOKENS", 3072))
 
+    # Retrieval + reranking (roadmap step 3)
+    reranker_model: str = field(default_factory=lambda: _env("RERANKER_MODEL", "BAAI/bge-reranker-base"))
+    reranker_enabled: bool = field(default_factory=lambda: _env("RERANKER_ENABLED", "1") == "1")
+    retrieval_top_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_TOP_K", 8))
+    retrieval_vector_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_VECTOR_TOP_N", 20))
+    retrieval_graph_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_GRAPH_TOP_N", 20))
+    retrieval_rrf_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_RRF_K", 60))
+    retrieval_rerank_candidates: int = field(default_factory=lambda: _env_int("RETRIEVAL_RERANK_CANDIDATES", 16))
+
     # GraphRAG scoping (README §3)
     graph_scoped_source_types: frozenset[str] = field(
         default_factory=lambda: frozenset(

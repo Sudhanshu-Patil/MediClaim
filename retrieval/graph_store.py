@@ -21,6 +21,7 @@ so Document uniqueness uses a single ``uid`` property = ``"{doc_id}:v{version}"`
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional, Sequence
 
 from neo4j import GraphDatabase
@@ -35,7 +36,13 @@ _CONSTRAINTS = [
     "CREATE INDEX document_doc_id IF NOT EXISTS FOR (d:Document) ON (d.doc_id)",
     "CREATE INDEX chunk_doc_id IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id)",
     "CREATE INDEX chunk_status IF NOT EXISTS FOR (c:Chunk) ON (c.status)",
+    # Lucene full-text index: the seed step of the graph retriever.
+    "CREATE FULLTEXT INDEX chunk_fulltext IF NOT EXISTS "
+    "FOR (c:Chunk) ON EACH [c.text, c.section_title]",
 ]
+
+# Lucene metacharacters that would break db.index.fulltext.queryNodes.
+_LUCENE_SPECIALS = re.compile(r'[+\-&|!(){}\[\]^"~*?:\\/]')
 
 
 def document_uid(doc_id: str, version: int) -> str:
@@ -152,6 +159,57 @@ class Neo4jStore:
                 query, doc_id=doc_id, doc_version=doc_version, superseded_by=superseded_by
             )
             return result.single()["n"]
+
+    # ── Graph retrieval (architecture: "Graph Retriever — Neo4j Cypher,
+    #    filter status=active") ────────────────────────────────────────────
+    def graph_search(
+        self,
+        query_text: str,
+        top_n: int = 20,
+        seed_limit: int = 10,
+        source_type: Optional[str] = None,
+        neighbor_decay: float = 0.5,
+    ) -> list[dict]:
+        """Full-text seed + 1-hop edge expansion, active chunks only.
+
+        Seeds come from the Lucene index over chunk text/section titles; each
+        seed then pulls in its statically-linked neighbors (REFERENCES both
+        directions, SUMMARIZES, and its parent via HAS_CHILD) at a decayed
+        score — this is where pre-built cross-reference edges pay off: a
+        chunk that says "see section 4.2" retrieves section 4.2 with it,
+        before any agent tool call is needed.
+
+        Returns [{chunk_id, score}, ...] best-first.
+        """
+        sanitized = _LUCENE_SPECIALS.sub(" ", query_text).strip()
+        if not sanitized:
+            return []
+
+        query = """
+        CALL db.index.fulltext.queryNodes('chunk_fulltext', $q) YIELD node, score
+        WHERE node.status = 'active'
+          AND ($source_type IS NULL OR node.source_type = $source_type)
+        WITH node, score ORDER BY score DESC LIMIT $seed_limit
+        OPTIONAL MATCH (node)-[:REFERENCES|SUMMARIZES]-(nbr:Chunk {status: 'active'})
+        OPTIONAL MATCH (parent:Chunk {status: 'active'})-[:HAS_CHILD]->(node)
+        WITH node, score,
+             [n IN collect(DISTINCT nbr) WHERE n IS NOT NULL] +
+             [p IN collect(DISTINCT parent) WHERE p IS NOT NULL] AS related
+        UNWIND [{id: node.chunk_id, s: score}] +
+               [r IN related | {id: r.chunk_id, s: score * $decay}] AS hit
+        RETURN hit.id AS chunk_id, max(hit.s) AS score
+        ORDER BY score DESC LIMIT $top_n
+        """
+        with self.driver.session() as session:
+            records = session.run(
+                query,
+                q=sanitized,
+                seed_limit=seed_limit,
+                top_n=top_n,
+                source_type=source_type,
+                decay=neighbor_decay,
+            )
+            return [{"chunk_id": r["chunk_id"], "score": r["score"]} for r in records]
 
     # ── Cross-references (README §9 static path) ────────────────────────────
     def create_reference_edges(self, edges: Sequence[dict]) -> int:

@@ -124,6 +124,27 @@ curl -X POST http://localhost:6333/collections/medclaim_chunks/points/count \
 Unchanged prose between v1 and v2 also shows up as `embedding_cache_hits > 0`
 — the Redis L3 cache skipping re-embedding (README §6).
 
+## 7. Query the index (roadmap step 3 — hybrid retrieval + reranking)
+
+```bash
+python scripts/query.py "What is the copay for an MRI of the brain?"
+python scripts/query.py "How do I appeal a denial?" --top-k 5 --json
+python scripts/query.py "..." --no-graph      # vector-only ablation
+python scripts/query.py "..." --no-rerank     # RRF order, no cross-encoder
+```
+
+Pipeline per query: embed (bge, L3-cached) → Qdrant search + Neo4j
+fulltext/edge-expansion search in parallel branches (both filtered to
+`status = active`) → **RRF fusion** (k=60) → table summaries swapped for
+their full atomic tables → **cross-encoder reranking** → top-k chunks with
+doc/section/page/bbox citation metadata.
+
+Reranker notes: the repo default is `BAAI/bge-reranker-base` (~1 GB RAM). On
+low-memory machines set `RERANKER_MODEL=Xenova/ms-marco-MiniLM-L-6-v2`
+(~80 MB) or `RERANKER_ENABLED=0`. If the model fails to load, retrieval
+degrades to fused order and marks results `reranked=false` — loudly, never
+silently.
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging

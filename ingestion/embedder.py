@@ -82,3 +82,29 @@ class CachedEmbedder:
             self.last_cache_misses,
         )
         return [v for v in vectors if v is not None]
+
+    def embed_query(self, query: str) -> list[float]:
+        """Query-side embedding (retrieval).
+
+        Uses fastembed's query_embed so models with an asymmetric query
+        instruction (bge's "Represent this sentence for searching...") get it
+        applied — passages and queries must not be embedded identically.
+        Cached under a "q::" hash so repeated queries skip the model.
+        """
+        import hashlib
+
+        query_hash = "q::" + hashlib.sha256(query.encode("utf-8")).hexdigest()
+        if self.cache:
+            hit = self.cache.get_many([query_hash])
+            if query_hash in hit:
+                return hit[query_hash]
+
+        model = self._get_model()
+        try:
+            vector = next(iter(model.query_embed(query))).tolist()
+        except AttributeError:  # older fastembed without query_embed
+            vector = next(iter(model.embed([query]))).tolist()
+
+        if self.cache:
+            self.cache.set_many({query_hash: vector})
+        return vector
