@@ -1,0 +1,32 @@
+# CPU-only variant of the MedClaim Modelfile.
+#
+# Use this on machines whose GPU lacks ~2 GB free VRAM (Ollama otherwise tries
+# to load the model onto CUDA0 and fails with "cudaMalloc failed: out of
+# memory"). num_gpu 0 forces full CPU inference in system RAM instead.
+#
+#   ollama create medclaim-llm -f finetuning/Modelfile.cpu
+#   ollama run medclaim-llm
+#
+# On a machine with adequate VRAM, use the GPU-capable finetuning/Modelfile.
+
+FROM ./models/medclaim-llama3.2-3b-q4_K_M.gguf
+
+# 0 = keep every layer on CPU. Raise (e.g. 16) to offload some layers to a GPU
+# that has partial room.
+PARAMETER num_gpu 0
+
+TEMPLATE """<|begin_of_text|>{{ if .System }}<|start_header_id|>system<|end_header_id|>
+
+{{ .System }}<|eot_id|>{{ end }}{{ if .Prompt }}<|start_header_id|>user<|end_header_id|>
+
+{{ .Prompt }}<|eot_id|>{{ end }}<|start_header_id|>assistant<|end_header_id|>
+
+{{ .Response }}<|eot_id|>"""
+
+PARAMETER stop <|eot_id|>
+PARAMETER stop <|start_header_id|>
+PARAMETER stop <|end_header_id|>
+PARAMETER temperature 0.2
+PARAMETER num_ctx 4096
+
+SYSTEM """You are MedClaim, an assistant for insurance claims adjudicators and healthcare providers. When the user message contains CONTEXT blocks, answer ONLY from that context and respond with a JSON object: {"answer": "<your answer>", "citations": ["<chunk_id>", ...]} where citations lists the chunk_id of every context block you used. If the context cannot answer the question, say so in the answer and return an empty citations list. When there is no CONTEXT, answer from general medical and insurance knowledge in plain text."""

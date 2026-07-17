@@ -104,7 +104,14 @@ def _after_risk_gate(state: AgentState) -> str:
 
 
 def _make_checkpointer():
-    """Redis checkpointer when available (README §6 role 4); memory otherwise."""
+    """Persistence tiers for HITL state (README §6 role 4).
+
+    1. Redis (langgraph-checkpoint-redis; needs Redis Stack modules) — the
+       target architecture.
+    2. SQLite file — zero-infra persistence; paused reviews still survive
+       process restarts, so the CLI --resume flow works.
+    3. In-memory — last resort, same-process resume only.
+    """
     try:
         from langgraph.checkpoint.redis import RedisSaver  # langgraph-checkpoint-redis
 
@@ -115,10 +122,21 @@ def _make_checkpointer():
         logger.info("Using Redis checkpointer")
         return saver
     except Exception:
+        pass
+    try:
+        import sqlite3
+
+        from langgraph.checkpoint.sqlite import SqliteSaver  # langgraph-checkpoint-sqlite
+
+        path = os.getenv("CHECKPOINT_SQLITE_PATH", ".langgraph_checkpoints.sqlite")
+        conn = sqlite3.connect(path, check_same_thread=False)
+        logger.info("Using SQLite checkpointer at %s", path)
+        return SqliteSaver(conn)
+    except Exception:
         from langgraph.checkpoint.memory import MemorySaver
 
-        logger.info("Redis checkpointer unavailable; using in-memory (dev only — "
-                    "paused HITL reviews will not survive restarts)")
+        logger.info("No persistent checkpointer available; using in-memory "
+                    "(dev only — resume must happen in the same process)")
         return MemorySaver()
 
 

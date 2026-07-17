@@ -224,6 +224,12 @@ of stacking timeouts, README §12).
   a partially-downloaded model cache. Delete
   `%USERPROFILE%\.cache\huggingface\hub\models--docling-project--docling-models`
   and rerun.
+- **`ollama run` fails with `cudaMalloc failed: out of memory`**: the GPU
+  lacks ~2 GB free VRAM for the model. Either free VRAM (close browsers/apps
+  using the GPU) or create the CPU variant instead:
+  `ollama create medclaim-llm -f finetuning/Modelfile.cpu` (runs in system
+  RAM; `num_gpu 0`). Partial offload: edit `num_gpu` to the layer count that
+  fits.
 - **Celery on Windows** hangs without `--pool=solo`.
 - **`neo4j` unhealthy at first**: it takes ~30–40 s to boot; the healthcheck
   allows for this. Check `docker compose logs neo4j`.

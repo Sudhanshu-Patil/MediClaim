@@ -24,7 +24,9 @@ tiktoken>=0.7
 # Agent (roadmap step 4)
 langgraph>=0.2.60
 httpx>=0.27
-# Optional: Redis persistence for HITL interrupts (falls back to in-memory)
+# HITL checkpoint persistence (file-based; CLI --resume works across processes)
+langgraph-checkpoint-sqlite>=2.0
+# Optional upgrade: Redis persistence (needs Redis Stack modules)
 # langgraph-checkpoint-redis>=0.0.6
 
 # Dev-only: generates the sample test PDF in scripts/generate_sample_pdf.py
