@@ -184,8 +184,12 @@ def build_graph(checkpointer=None):
     graph.add_edge("router", "retrieve")
     graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", "validate")
+    # grounding (CPU NLI) ∥ judge (GPU LLM) — independent checks over the same
+    # draft; running them in one superstep hides the shorter one entirely.
+    # They write disjoint state keys, so no reducer is needed at the join.
     graph.add_edge("validate", "grounding")
-    graph.add_edge("grounding", "judge")
+    graph.add_edge("validate", "judge")
+    graph.add_edge("grounding", "risk_gate")
     graph.add_edge("judge", "risk_gate")
     graph.add_conditional_edges("risk_gate", _after_risk_gate,
                                 {"hitl_review": "hitl_review", "finalize": "finalize"})

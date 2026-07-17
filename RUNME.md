@@ -281,14 +281,29 @@ Current results (10-question golden set, single-document corpus):
 
 | run | context_precision | context_recall | faithfulness_nli | trap_refusal |
 |---|---|---|---|---|
-| ft-hybrid | 0.944 | 1.0 | 0.556 | 1.0 |
+| ft-hybrid-v3 (current) | 0.944 | 1.0 | 0.667 | 1.0 |
+| ft-hybrid (pre-tuning) | 0.944 | 1.0 | 0.556 | 1.0 |
 | ft-vector-only | 0.944 | 1.0 | 0.444 | 1.0 |
 
 Honest reading: retrieval saturates on a corpus this small; the hybrid/graph
-gain (+0.11 faithfulness) comes from better generation context. The
-faithfulness gap itself is real generation weakness the eval surfaced —
-terse fragment answers, one wrong-entity answer, one wrong refusal — which is
-the v2 fine-tuning worklist.
+gain comes through generation grounding (vector-only 0.444 → hybrid 0.556).
+The v3 tuning pass added +0.111 faithfulness via three fixes found by
+testing: context truncation was silently cutting the tail of the 46-row
+table (max_chunk_chars 3500→6000 + Modelfile num_ctx 4096→8192), markdown
+table rows are now verbalized for the NLI check, and generation runs at
+temperature 0 (deterministic adjudication + reproducible evals). The
+remaining gap is terse fragment answers from the 3B fine-tune — v2
+training-data worklist (an inference-time "answer in sentences" nudge was
+tried and REVERTED: it derailed the format-locked model into echoing
+context, caught by the guardrails).
+
+Performance (measured): warm in-process query ≈ 9 s — generation 3.5 s +
+judge 4.2 s dominate; vector∥graph and grounding∥judge now run in parallel
+branches; `LLM_KEEP_ALIVE=30m` keeps the model resident between CLI runs
+(saves a 12 s reload). CLI cold-start (~25 s) is process model-loading —
+the persistent FastAPI server (roadmap step 8) is the real fix. A rerank-
+candidate trim (16→12) was tried for ~400 ms and REVERTED after measuring a
+0.17 context-precision cost.
 
 Dependency note: `ragas 0.2.x / langchain-core 0.3.x / langgraph 0.6.x` are
 pinned **as a set** in requirements.txt — moving any one of them alone breaks

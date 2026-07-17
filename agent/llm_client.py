@@ -82,6 +82,9 @@ class OllamaClient:
                 "model": self.model,
                 "messages": messages,
                 "stream": False,
+                # Keep the model resident between short-lived CLI runs —
+                # otherwise every cold call pays ~12 s of load time.
+                "keep_alive": os.getenv("LLM_KEEP_ALIVE", "30m"),
                 "options": {"temperature": temperature, "num_predict": max_tokens},
             }
             if json_mode:

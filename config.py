@@ -70,6 +70,9 @@ class Settings:
     retrieval_vector_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_VECTOR_TOP_N", 20))
     retrieval_graph_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_GRAPH_TOP_N", 20))
     retrieval_rrf_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_RRF_K", 60))
+    # 16, not fewer: trimming to 12 was measured to cost 0.17 context
+    # precision on the golden set for ~400 ms — not a good trade. The
+    # cross-encoder pass is the retrieval latency floor (~100 ms/candidate).
     retrieval_rerank_candidates: int = field(default_factory=lambda: _env_int("RETRIEVAL_RERANK_CANDIDATES", 16))
 
     # Grounding / NLI entailment check (roadmap step 5, README §8)

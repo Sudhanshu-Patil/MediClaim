@@ -39,11 +39,20 @@ def get_llm() -> OllamaClient:
     return _llm
 
 
-def build_user_message(query: str, chunks: list[dict], max_chunk_chars: int = 3500) -> str:
+def build_user_message(query: str, chunks: list[dict], max_chunk_chars: int = 6000) -> str:
+    # 6000 (not 3500): the 46-row reimbursement table is ~4400 chars; the old
+    # cap silently cut every row after OP-6003, making the model confidently
+    # wrong about anything in the table's tail (caught by NLI grounding).
+    # Requires num_ctx 8192 in the Modelfile.
     blocks = [
         f"[chunk_id={c['chunk_id']}]\n{c['text'][:max_chunk_chars]}"
         for c in chunks
     ]
+    # NOTE: keep this EXACTLY in the fine-tuned format (finetuning/
+    # build_dataset.py). A tested "answer in complete sentences" nudge after
+    # the question derailed the model into echoing the context verbatim —
+    # the fine-tune is format-locked; richer answers are a v2 training-data
+    # change, not an inference-time prompt tweak.
     return "CONTEXT:\n" + "\n\n".join(blocks) + f"\n\nQUESTION: {query}"
 
 
@@ -82,7 +91,10 @@ def generate(state: AgentState) -> dict:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": build_user_message(state["query"], chunks)},
     ]
-    raw = get_llm().chat(messages, json_mode=True)
+    # temperature 0: adjudication answers should be deterministic — same
+    # policy + same question must yield the same answer (and it makes eval
+    # runs reproducible).
+    raw = get_llm().chat(messages, json_mode=True, temperature=0.0)
     answer, citations = parse_generation(raw)
     logger.info("Generated answer (%d chars, %d citations)", len(answer), len(citations))
     return {"answer": answer, "citations": citations, "generation_raw": raw}

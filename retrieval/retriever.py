@@ -86,24 +86,34 @@ class HybridRetriever:
         s = self.settings
         top_k = top_k or s.retrieval_top_k
 
-        # ── 1. Vector branch ────────────────────────────────────────────────
-        query_vector = self.embedder.embed_query(query)
-        vector_hits = self.vectors.search(
-            query_vector,
-            top_n=s.retrieval_vector_top_n,
-            chunk_types=_RETRIEVABLE_CHUNK_TYPES,
-            source_type=source_type,
-        )
-        payloads: dict[str, dict] = {h["chunk_id"]: h["payload"] for h in vector_hits}
-        vector_ranked = [h["chunk_id"] for h in vector_hits]
+        # ── 1+2. Vector ∥ graph branches (independent — run concurrently,
+        #        saving the graph round-trip, ~300 ms) ─────────────────────
+        def _vector_branch() -> list[dict]:
+            query_vector = self.embedder.embed_query(query)
+            return self.vectors.search(
+                query_vector,
+                top_n=s.retrieval_vector_top_n,
+                chunk_types=_RETRIEVABLE_CHUNK_TYPES,
+                source_type=source_type,
+            )
 
-        # ── 2. Graph branch (fulltext seeds + REFERENCES/SUMMARIZES/parent) ─
         graph_ranked: list[str] = []
         if use_graph:
-            graph_hits = self.graph.graph_search(
-                query, top_n=s.retrieval_graph_top_n, source_type=source_type
-            )
-            graph_ranked = [h["chunk_id"] for h in graph_hits]
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                vector_future = pool.submit(_vector_branch)
+                graph_future = pool.submit(
+                    self.graph.graph_search, query,
+                    top_n=s.retrieval_graph_top_n, source_type=source_type,
+                )
+                vector_hits = vector_future.result()
+                graph_ranked = [h["chunk_id"] for h in graph_future.result()]
+        else:
+            vector_hits = _vector_branch()
+
+        payloads: dict[str, dict] = {h["chunk_id"]: h["payload"] for h in vector_hits}
+        vector_ranked = [h["chunk_id"] for h in vector_hits]
 
         # ── 3. RRF fusion ───────────────────────────────────────────────────
         fused = rrf_fuse(

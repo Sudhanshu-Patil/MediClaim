@@ -80,24 +80,58 @@ def _normalize(text: str) -> str:
     return _NORM_RE.sub(" ", text.lower()).replace("  ", " ").strip()
 
 
+def _verbalize_table_rows(premise: str, hypothesis: str, cap: int = 8) -> list[str]:
+    """Markdown table rows → short natural-language premises.
+
+    NLI models are poor at (markdown table → sentence) entailment, so a row
+    like `| OP-3003 | MRI brain | 680.00 | 20% | Yes |` becomes
+    "Procedure Code: OP-3003; Description: MRI brain; ...", which entails
+    "The copay for MRI brain is 20%" reliably. Rows are lexically prefiltered
+    against the hypothesis so at most ``cap`` NLI calls are added.
+    """
+    lines = [l.strip() for l in premise.splitlines() if l.strip().startswith("|")]
+    if len(lines) < 3:
+        return []
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    hyp_tokens = {t for t in _normalize(hypothesis).split() if len(t) > 2}
+    rows: list[str] = []
+    for line in lines[2:]:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) != len(header) or not any(cells):
+            continue
+        verbalized = "; ".join(f"{h}: {c}" for h, c in zip(header, cells)) + "."
+        row_tokens = set(_normalize(verbalized).split())
+        if hyp_tokens & row_tokens:
+            rows.append(verbalized)
+    return rows[:cap]
+
+
 def _sentence_grounded_prob(sentence: str, premise: str) -> float:
     """Max entailment of one answer sentence against one cited chunk.
 
-    Two-stage:
+    Stages:
       1. Lexical containment fast-path — a sentence that appears verbatim in
          the premise is grounded by definition (extractive answers are the
          common case), no model call needed.
-      2. NLI over sliding sentence windows of the premise. Small NLI models
+      2. Verbalized table rows (tables entail poorly as raw markdown).
+      3. NLI over sliding sentence windows of the premise. Small NLI models
          dilute over long premises (observed live: a verbatim quote scored
          under 0.5 against a full 200-word chunk), so score against 3-sentence
          windows and take the max.
     """
     if _normalize(sentence) and _normalize(sentence) in _normalize(premise):
         return 1.0
-    premise_sentences = split_sentences(premise)
-    if len(premise_sentences) <= 3:
-        return _entailment_prob(premise, sentence)
     best = 0.0
+    for row in _verbalize_table_rows(premise, sentence):
+        best = max(best, _entailment_prob(row, sentence))
+        if best >= 0.95:
+            return best
+    premise_sentences = [s for s in split_sentences(premise)
+                         if not s.lstrip().startswith("|")]
+    if not premise_sentences:
+        return best
+    if len(premise_sentences) <= 3:
+        return max(best, _entailment_prob(" ".join(premise_sentences), sentence))
     for i in range(0, len(premise_sentences), 2):
         window = " ".join(premise_sentences[i : i + 3])
         best = max(best, _entailment_prob(window, sentence))
@@ -121,7 +155,7 @@ def grounding(state: AgentState) -> dict:
         return {"grounding_checked": False, "grounding_score": None,
                 "ungrounded_sentences": []}
 
-    premises = [c["text"][:3000] for c in cited]
+    premises = [c["text"][:6000] for c in cited]  # keep full tables (see generate.py)
     sentences = split_sentences(answer)
     if not sentences:
         return {"grounding_checked": False, "grounding_score": None,
