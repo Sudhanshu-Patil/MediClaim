@@ -39,5 +39,15 @@ langgraph-checkpoint-sqlite>=2.0,<3
 # Observability (roadmap step 6) — v2 SDK to match the self-hosted v2 server
 langfuse>=2.53,<3
 
+# API + UI + MCP (roadmap step 8)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+slowapi>=0.1.9
+sse-starlette>=2.0
+streamlit>=1.38
+pymupdf>=1.24          # source-page rendering with bbox highlights
+mcp>=1.2               # custom MCP server
+edge-tts>=6.1          # free TTS endpoint
+
 # Dev-only: generates the sample test PDF in scripts/generate_sample_pdf.py
 reportlab>=4.1

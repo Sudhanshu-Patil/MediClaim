@@ -9,3 +9,4 @@ sample_docs/*.pdf
 .langgraph_checkpoints.sqlite
 # Model weights live on HF Hub (sud000/medclaim-llama3.2-3b-gguf), never in git
 finetuning/models/
+data/

@@ -113,6 +113,51 @@ class OllamaClient:
 
         return _call()
 
+    def chat_stream(
+        self,
+        messages: list[dict],
+        json_mode: bool = False,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ):
+        """Streaming chat completion — yields content deltas as they generate.
+
+        Same circuit breaker as chat(). The caller accumulates the full text;
+        Ollama sends usage counts in the final chunk (ignored here — the
+        traced non-stream path records usage).
+        """
+        self._check_circuit()
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "keep_alive": os.getenv("LLM_KEEP_ALIVE", "30m"),
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if json_mode:
+            payload["format"] = "json"
+        try:
+            with httpx.stream("POST", f"{self.base_url}/api/chat",
+                              json=payload, timeout=self.timeout) as response:
+                response.raise_for_status()
+                import json as _json
+
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    data = _json.loads(line)
+                    delta = data.get("message", {}).get("content", "")
+                    if delta:
+                        yield delta
+                    if data.get("done"):
+                        break
+            self._record(ok=True)
+        except httpx.HTTPError as exc:
+            self._record(ok=False)
+            raise RuntimeError(
+                f"LLM stream failed against {self.base_url}: {exc}"
+            ) from exc
+
     def is_available(self) -> bool:
         try:
             return httpx.get(f"{self.base_url}/api/tags", timeout=5.0).status_code == 200

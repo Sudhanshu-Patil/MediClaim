@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from agent.llm_client import OllamaClient
@@ -79,6 +80,44 @@ def parse_generation(raw: str) -> tuple[str, list[str]]:
     return raw.strip(), []
 
 
+class AnswerFieldStreamer:
+    """Incrementally extract the "answer" string value from streamed JSON.
+
+    The model emits {"answer": "...", "citations": [...]} token by token; the
+    UI should render the prose as it generates, never the raw JSON. Feed each
+    delta in; it returns only the characters inside the answer value
+    (JSON-unescaped), going silent once the closing quote arrives.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._in_answer = False
+        self._done = False
+        self._escaped = False
+
+    def feed(self, delta: str) -> str:
+        if self._done:
+            return ""
+        out = []
+        for ch in delta:
+            if not self._in_answer:
+                self._buffer += ch
+                if re.search(r'"answer"\s*:\s*"$', self._buffer):
+                    self._in_answer = True
+                continue
+            if self._escaped:
+                out.append({"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(ch, ch))
+                self._escaped = False
+            elif ch == "\\":
+                self._escaped = True
+            elif ch == '"':
+                self._done = True
+                break
+            else:
+                out.append(ch)
+        return "".join(out)
+
+
 def generate(state: AgentState) -> dict:
     chunks = state.get("chunks", [])
     if not chunks:
@@ -91,10 +130,33 @@ def generate(state: AgentState) -> dict:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": build_user_message(state["query"], chunks)},
     ]
+
+    # When invoked via app.stream(..., stream_mode="custom") (the API path),
+    # answer tokens stream out live; otherwise the blocking call is used.
+    writer = None
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+    except Exception:
+        pass
+
     # temperature 0: adjudication answers should be deterministic — same
     # policy + same question must yield the same answer (and it makes eval
     # runs reproducible).
-    raw = get_llm().chat(messages, json_mode=True, temperature=0.0)
+    llm = get_llm()
+    if writer is not None and hasattr(llm, "chat_stream"):
+        streamer = AnswerFieldStreamer()
+        parts: list[str] = []
+        for delta in llm.chat_stream(messages, json_mode=True, temperature=0.0):
+            parts.append(delta)
+            visible = streamer.feed(delta)
+            if visible:
+                writer({"token": visible})
+        raw = "".join(parts)
+    else:
+        raw = llm.chat(messages, json_mode=True, temperature=0.0)
+
     answer, citations = parse_generation(raw)
     logger.info("Generated answer (%d chars, %d citations)", len(answer), len(citations))
     return {"answer": answer, "citations": citations, "generation_raw": raw}

@@ -309,6 +309,51 @@ Dependency note: `ragas 0.2.x / langchain-core 0.3.x / langgraph 0.6.x` are
 pinned **as a set** in requirements.txt — moving any one of them alone breaks
 either ragas imports or the HITL `__interrupt__` contract.
 
+## 13. API + UI + MCP server (roadmap step 8)
+
+```bash
+python scripts/seed_claims.py                      # one-time: synthetic claims DB
+uvicorn api.main:app --host 127.0.0.1 --port 8000  # terminal 1 — backend
+streamlit run ui/app.py                            # terminal 2 — UI at :8501
+```
+
+**FastAPI backend** (`api/main.py`) — the persistent process is itself the
+latency fix: all models load once at startup (vs ~25 s per CLI run).
+Endpoints: `POST /ask` (SSE — `token` events stream the answer as it
+generates, then `result` or `review`), `POST /review/{thread}` (HITL
+verdicts), `POST /upload` (ingest a document), `GET /source/{chunk_id}/image`
+(the source PDF page rendered with the cited region highlighted — bbox
+provenance from ingestion), `GET /chunks/{id}`, `GET /tts` (free edge-tts
+audio), `GET /health`. Rate-limited with slowapi (README §12).
+
+**Streamlit UI** (`ui/app.py`): streaming chat (tokens render live via
+`st.write_stream`), per-answer quality badges (grounding / judge / route /
+PII), a sources panel per citation with the highlighted page image, document
+upload from the sidebar, an inline HITL review card (approve / edit /
+reject), and voice — browser SpeechSynthesis (instant, free) or server
+edge-tts.
+
+**MCP server** (`agent/mcp_server.py`, stdio):
+
+```bash
+python agent/mcp_server.py
+```
+
+Tools: `resolve_reference` (section → chunk), `policy_lookup` (hybrid
+retrieval), `claim_db_query` and `fraud_flag` (synthetic claims SQLite).
+The same `resolve_reference` implementation also runs *inside* the graph as
+a deterministic node between retrieve and generate, capped at 2 resolutions
+(README §9) — deliberate: the format-locked 3B is unreliable at free-form
+tool calling, so the common case is deterministic and the MCP surface serves
+real agentic clients (e.g. Claude Desktop).
+
+Claude Desktop config snippet:
+
+```json
+{"mcpServers": {"medclaim": {"command": "<repo>/.venv/Scripts/python.exe",
+                              "args": ["<repo>/agent/mcp_server.py"]}}}
+```
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging

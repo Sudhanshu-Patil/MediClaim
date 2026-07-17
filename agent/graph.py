@@ -27,6 +27,7 @@ from agent.nodes.generate import generate
 from agent.nodes.grounding import grounding
 from agent.nodes.input_guard import input_guard
 from agent.nodes.judge import judge
+from agent.nodes.resolve import resolve_references
 from agent.nodes.retrieve import retrieve
 from agent.nodes.router import route_query
 from agent.nodes.validate import validate
@@ -167,6 +168,7 @@ def build_graph(checkpointer=None):
     graph.add_node("input_guard", traced("input_guard")(input_guard))
     graph.add_node("router", traced("router")(route_query))
     graph.add_node("retrieve", traced("retrieve")(retrieve))
+    graph.add_node("resolve_refs", traced("resolve_refs")(resolve_references))
     graph.add_node("generate", traced("generate")(generate))
     graph.add_node("validate", traced("validate")(validate))
     graph.add_node("grounding", traced("grounding")(grounding))
@@ -182,7 +184,8 @@ def build_graph(checkpointer=None):
         {"finalize": "finalize", "router": "router"},
     )
     graph.add_edge("router", "retrieve")
-    graph.add_edge("retrieve", "generate")
+    graph.add_edge("retrieve", "resolve_refs")   # README §9 dynamic path, capped
+    graph.add_edge("resolve_refs", "generate")
     graph.add_edge("generate", "validate")
     # grounding (CPU NLI) ∥ judge (GPU LLM) — independent checks over the same
     # draft; running them in one superstep hides the shorter one entirely.
