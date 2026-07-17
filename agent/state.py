@@ -50,6 +50,8 @@ class AgentState(TypedDict, total=False):
     grounding_checked: bool
     grounding_score: Optional[float]     # fraction of sentences entailed, 0..1
     ungrounded_sentences: list[str]      # hallucination flags
+    sentence_attributions: list[dict]    # per-sentence best-grounding chunk_id
+                                         # (drives inline [n] citations in UI)
 
     # judge
     judge_score: float              # 0..1

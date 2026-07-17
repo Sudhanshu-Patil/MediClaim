@@ -1,16 +1,18 @@
 """Streamlit UI for MedClaim (roadmap step 8, README §8 point 4).
 
 Features:
-  * chat with TRUE token streaming (SSE from the FastAPI backend — the answer
-    renders as the model generates it)
-  * per-citation source panel: doc/version/section/page plus the actual PDF
-    page rendered with the cited region highlighted (bbox provenance)
-  * quality badges per answer: grounding score, judge score, route, PII
-  * document upload → live ingestion into the corpus
-  * HITL review queue: approve / edit / reject paused answers
-  * voice: browser SpeechSynthesis (instant, free) or server edge-tts audio
+  * chat with TRUE token streaming (SSE — the answer renders as it generates)
+  * INLINE citations: [n] markers per sentence, attributed by the same NLI
+    model that runs the grounding guardrail; numbered sources panel with the
+    actual PDF page rendered and the cited region highlighted (bbox)
+  * persistent chat HISTORY (SQLite): new / switch / delete, survives refresh
+  * per-answer FEEDBACK (👍/👎 + comment) → /feedback — the self-healing
+    flywheel (scripts/export_feedback.py turns 👎 into fine-tune hard cases)
+  * suggested FOLLOW-UP question chips (lazy fetch, never blocks the stream)
+  * quality badges (grounding / judge / route / PII), HITL review card,
+    document upload, voice (browser SpeechSynthesis or server edge-tts)
 
-Run (backend must be up first):
+Run (backend first):
     uvicorn api.main:app --port 8000
     streamlit run ui/app.py
 """
@@ -19,24 +21,31 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 
 import httpx
 import streamlit as st
 import streamlit.components.v1 as components
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ui import chat_store  # noqa: E402
+
 API = os.getenv("MEDCLAIM_API", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="MedClaim", page_icon="🏥", layout="wide")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []   # [{role, content, meta}]
-if "pending_review" not in st.session_state:
-    st.session_state.pending_review = None
+ss = st.session_state
+ss.setdefault("chat_id", None)
+ss.setdefault("messages", [])
+ss.setdefault("pending_review", None)
+ss.setdefault("queued_prompt", None)
+ss.setdefault("followups", {})   # thread_id -> [questions]
+ss.setdefault("feedback_sent", set())
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 def sse_events(response: httpx.Response):
-    """Parse an SSE byte stream into (event, data) tuples."""
     event, data_lines = None, []
     for line in response.iter_lines():
         if line.startswith("event: "):
@@ -49,8 +58,7 @@ def sse_events(response: httpx.Response):
 
 
 def ask_streaming(query: str, source_type):
-    """Yield answer tokens for st.write_stream; stash the final meta."""
-    st.session_state._last_meta = None
+    ss._last_meta = None
     with httpx.stream("POST", f"{API}/ask",
                       json={"query": query, "source_type": source_type},
                       timeout=300.0) as response:
@@ -60,13 +68,31 @@ def ask_streaming(query: str, source_type):
                 yield data["t"]
             elif event in ("result", "review"):
                 data["_event"] = event
-                st.session_state._last_meta = data
+                ss._last_meta = data
             elif event == "error":
                 yield f"\n\n⚠️ {data.get('detail')}"
 
 
-def speak_browser(text: str, key: str) -> None:
-    """Zero-cost TTS via the browser's SpeechSynthesis API."""
+def inline_cited_markdown(meta: dict) -> str:
+    """Rebuild the answer with [n] inline citation markers per sentence,
+    using the NLI sentence→chunk attributions computed by the grounding node."""
+    answer = meta.get("answer") or ""
+    attributions = meta.get("sentence_attributions") or []
+    citations = meta.get("citations") or []
+    numbering = {c["chunk_id"]: i + 1 for i, c in enumerate(citations)}
+    if not attributions or not numbering:
+        return answer
+    parts = []
+    for att in attributions:
+        marker = ""
+        n = numbering.get(att.get("chunk_id"))
+        if n:
+            marker = f" **[{n}]**"
+        parts.append(att["sentence"].rstrip() + marker)
+    return " ".join(parts)
+
+
+def speak_browser(text: str) -> None:
     safe = json.dumps(text[:800])
     components.html(
         f"""<script>
@@ -78,8 +104,7 @@ def speak_browser(text: str, key: str) -> None:
     )
 
 
-def render_meta(meta: dict) -> None:
-    """Quality badges + citation source panel."""
+def render_meta(meta: dict, message_key: str) -> None:
     badge_cols = st.columns(4)
     grounding = meta.get("grounding_score")
     judge = meta.get("judge_score")
@@ -95,42 +120,123 @@ def render_meta(meta: dict) -> None:
 
     citations = meta.get("citations") or []
     if citations:
-        st.caption("SOURCES (grouped by document)")
-        by_doc: dict[str, list[dict]] = {}
-        for c in citations:
-            by_doc.setdefault(c.get("doc_name") or "unknown", []).append(c)
-        for doc_name, cites in by_doc.items():
-            for c in cites:
-                label = (f"📄 {doc_name} v{c.get('doc_version')} — "
-                         f"{c.get('section_title') or 'section'}"
-                         + (f" (p.{c['page_number']})" if c.get("page_number") else ""))
-                with st.expander(label):
-                    try:
-                        chunk = httpx.get(f"{API}/chunks/{c['chunk_id']}", timeout=30).json()
-                        st.text(chunk.get("text", "")[:1200])
-                    except Exception:
-                        st.caption("chunk text unavailable")
-                    if c.get("has_bbox"):
-                        st.image(f"{API}/source/{c['chunk_id']}/image",
-                                 caption="source page, cited region highlighted")
+        st.caption("SOURCES")
+        for i, c in enumerate(citations, start=1):
+            label = (f"[{i}] 📄 {c.get('doc_name')} v{c.get('doc_version')} — "
+                     f"{c.get('section_title') or 'section'}"
+                     + (f" (p.{c['page_number']})" if c.get("page_number") else ""))
+            with st.expander(label):
+                try:
+                    chunk = httpx.get(f"{API}/chunks/{c['chunk_id']}", timeout=30).json()
+                    st.text(chunk.get("text", "")[:1200])
+                except Exception:
+                    st.caption("chunk text unavailable")
+                if c.get("has_bbox"):
+                    st.image(f"{API}/source/{c['chunk_id']}/image",
+                             caption="source page, cited region highlighted")
+
+    # ── feedback row (self-healing flywheel) ────────────────────────────────
+    thread_id = meta.get("thread_id")
+    if thread_id and meta.get("status") == "answered":
+        fb_key = f"fb_{message_key}"
+        if fb_key in ss.feedback_sent:
+            st.caption("✔ feedback recorded — thank you")
+        else:
+            c1, c2, c3 = st.columns([1, 1, 6])
+            up = c1.button("👍", key=f"up_{message_key}")
+            down = c2.button("👎", key=f"down_{message_key}")
+            comment = c3.text_input("optional: what was wrong / right?",
+                                    key=f"cmt_{message_key}",
+                                    label_visibility="collapsed",
+                                    placeholder="optional comment…")
+            if up or down:
+                try:
+                    httpx.post(f"{API}/feedback",
+                               json={"thread_id": thread_id,
+                                     "rating": 1 if up else -1,
+                                     "comment": comment or None}, timeout=30)
+                    ss.feedback_sent.add(fb_key)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"feedback failed: {exc}")
+
+    # ── follow-up chips (lazy) ──────────────────────────────────────────────
+    if thread_id and meta.get("status") == "answered":
+        if thread_id not in ss.followups:
+            try:
+                data = httpx.get(f"{API}/followups/{thread_id}", timeout=60).json()
+                ss.followups[thread_id] = data.get("questions", [])
+            except Exception:
+                ss.followups[thread_id] = []
+        questions = ss.followups.get(thread_id) or []
+        if questions:
+            st.caption("SUGGESTED FOLLOW-UPS")
+            cols = st.columns(len(questions))
+            for col, q in zip(cols, questions):
+                if col.button(q, key=f"fu_{message_key}_{hash(q) & 0xffff}"):
+                    ss.queued_prompt = q
+                    st.rerun()
 
 
-# ── sidebar: corpus + settings ──────────────────────────────────────────────
+def run_turn(prompt: str, source_type) -> None:
+    if ss.chat_id is None:
+        ss.chat_id = chat_store.create_chat(prompt)
+    chat_store.append_message(ss.chat_id, "user", prompt)
+    ss.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    with st.chat_message("assistant"):
+        st.write_stream(ask_streaming(prompt, source_type))
+        meta = ss.get("_last_meta") or {}
+        if meta.get("_event") == "review":
+            ss.pending_review = meta
+            content = f"*(draft held for review)* {meta.get('answer', '')}"
+            chat_store.append_message(ss.chat_id, "assistant", content)
+            ss.messages.append({"role": "assistant", "content": content, "meta": None})
+        else:
+            content = inline_cited_markdown(meta) or meta.get("answer") or ""
+            chat_store.append_message(ss.chat_id, "assistant", content, meta)
+            ss.messages.append({"role": "assistant", "content": content, "meta": meta})
+            if ss.get("voice_mode", "off").startswith("browser"):
+                speak_browser(meta.get("answer") or content)
+    st.rerun()
+
+
+# ── sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏥 MedClaim")
-    st.caption("Local agentic RAG for claims adjudication")
-
     try:
         health = httpx.get(f"{API}/health", timeout=10).json()
         st.success(f"API up · {health.get('qdrant_points', '?')} chunks · "
                    f"LLM {'✓' if health.get('llm_available') else '✗'}")
     except Exception:
-        st.error(f"API unreachable at {API} — start it:\n`uvicorn api.main:app --port 8000`")
+        st.error(f"API unreachable at {API}\n`uvicorn api.main:app --port 8000`")
 
+    # ── history management ─────────────────────────────────────────────────
+    st.subheader("💬 Chats")
+    if st.button("➕ New chat", use_container_width=True):
+        ss.chat_id, ss.messages, ss.pending_review = None, [], None
+        st.rerun()
+    for chat in chat_store.list_chats()[:15]:
+        col_open, col_del = st.columns([5, 1])
+        selected = chat["chat_id"] == ss.chat_id
+        if col_open.button(("● " if selected else "") + chat["title"][:34],
+                           key=f"open_{chat['chat_id']}", use_container_width=True):
+            ss.chat_id = chat["chat_id"]
+            ss.messages = chat_store.load_messages(chat["chat_id"])
+            ss.pending_review = None
+            st.rerun()
+        if col_del.button("🗑", key=f"del_{chat['chat_id']}"):
+            chat_store.delete_chat(chat["chat_id"])
+            if selected:
+                ss.chat_id, ss.messages = None, []
+            st.rerun()
+
+    st.divider()
     source_type = st.selectbox("Filter by source type",
                                [None, "policy", "clinical_guideline", "claim_note"],
                                format_func=lambda v: v or "all documents")
-    voice_mode = st.radio("Voice", ["off", "browser (instant)", "server (edge-tts)"])
+    ss.voice_mode = st.radio("Voice", ["off", "browser (instant)", "server (edge-tts)"])
 
     st.divider()
     st.subheader("📥 Add a document")
@@ -153,14 +259,14 @@ with st.sidebar:
 # ── main: chat ──────────────────────────────────────────────────────────────
 st.header("Ask the policy corpus")
 
-for message in st.session_state.messages:
+for idx, message in enumerate(ss.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message.get("meta"):
-            render_meta(message["meta"])
+            render_meta(message["meta"], message_key=str(idx))
 
-if st.session_state.pending_review:
-    meta = st.session_state.pending_review
+if ss.pending_review:
+    meta = ss.pending_review
     with st.container(border=True):
         st.subheader("⏸️ Human review required")
         st.caption(meta.get("review_reason") or "")
@@ -169,45 +275,26 @@ if st.session_state.pending_review:
                               value=meta.get("answer") or "")
         note = st.text_input("Reviewer note")
         c1, c2, c3 = st.columns(3)
-        verdict = None
+        verdict, payload = None, {}
         if c1.button("✅ Approve"):
-            verdict, payload = "approved", {}
+            verdict = "approved"
         if c2.button("✏️ Send edited"):
             verdict, payload = "edited", {"answer": edited}
         if c3.button("❌ Reject"):
-            verdict, payload = "rejected", {}
+            verdict = "rejected"
         if verdict:
             final = httpx.post(f"{API}/review/{meta['thread_id']}",
                                json={"verdict": verdict, "note": note, **payload},
                                timeout=60.0).json()
-            st.session_state.messages.append(
-                {"role": "assistant", "content": final.get("answer") or "",
-                 "meta": final})
-            st.session_state.pending_review = None
+            content = inline_cited_markdown(final) or final.get("answer") or ""
+            chat_store.append_message(ss.chat_id, "assistant", content, final)
+            ss.messages.append({"role": "assistant", "content": content, "meta": final})
+            ss.pending_review = None
             st.rerun()
 
+if ss.queued_prompt:
+    prompt, ss.queued_prompt = ss.queued_prompt, None
+    run_turn(prompt, source_type)
+
 if prompt := st.chat_input("e.g. What is the copay for an MRI of the brain?"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    with st.chat_message("assistant"):
-        streamed_text = st.write_stream(ask_streaming(prompt, source_type))
-        meta = st.session_state.get("_last_meta") or {}
-        if meta.get("_event") == "review":
-            st.session_state.pending_review = meta
-            st.info("Held for human review — see panel above after rerun.")
-            st.session_state.messages.append(
-                {"role": "assistant",
-                 "content": f"*(draft held for review)* {meta.get('answer','')}",
-                 "meta": None})
-        else:
-            final_text = meta.get("answer") or streamed_text
-            render_meta(meta)
-            st.session_state.messages.append(
-                {"role": "assistant", "content": final_text, "meta": meta})
-            if voice_mode.startswith("browser"):
-                speak_browser(final_text, key=str(len(st.session_state.messages)))
-            elif voice_mode.startswith("server"):
-                st.audio(f"{API}/tts?text={httpx.QueryParams({'text': final_text[:800]})['text']}",
-                         format="audio/mpeg")
-    st.rerun()
+    run_turn(prompt, source_type)

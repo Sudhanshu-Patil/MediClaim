@@ -347,6 +347,22 @@ a deterministic node between retrieve and generate, capped at 2 resolutions
 tool calling, so the common case is deterministic and the MCP surface serves
 real agentic clients (e.g. Claude Desktop).
 
+**UI extras**:
+* **Inline citations** — [n] markers per sentence, attributed by the same
+  NLI model as the grounding guardrail (`sentence_attributions` in the /ask
+  payload), numbered to the sources panel.
+* **Chat history** — persistent (SQLite `data/chats.db`): new / switch /
+  delete from the sidebar, survives refresh.
+* **Feedback → self-healing flywheel** — 👍/👎 + comment per answer →
+  `POST /feedback` (SQLite `data/feedback.db`). Then
+  `python scripts/export_feedback.py` turns 👎 rows into
+  `finetuning/data/hard_cases.jsonl`: reviewer-EDITED answers become ready
+  training examples (the human correction is the target), plain 👎 rows are
+  emitted for manual curation — bad answers literally become the next
+  fine-tune's training data.
+* **Suggested follow-ups** — 3 clickable question chips per answer
+  (`GET /followups/{thread}`, fetched lazily so the stream never waits).
+
 Claude Desktop config snippet:
 
 ```json

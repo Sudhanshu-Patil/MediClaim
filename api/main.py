@@ -113,6 +113,8 @@ def _final_payload(state: dict, thread_id: str) -> dict:
         "ungrounded_sentences": state.get("ungrounded_sentences", []),
         "pii_redacted": state.get("pii_redacted", []),
         "route": state.get("route"),
+        # per-sentence best-grounding chunk (drives inline [n] citations)
+        "sentence_attributions": state.get("sentence_attributions", []),
     }
 
 
@@ -285,6 +287,91 @@ def tts(request: Request, text: str, voice: str = "en-US-AriaNeural"):
     except Exception as exc:
         raise HTTPException(502, f"TTS failed: {exc}")
     return Response(content=audio, media_type="audio/mpeg")
+
+
+# ── Feedback (the self-healing flywheel, part 1: capture) ──────────────────
+FEEDBACK_DB = Path(__file__).resolve().parents[1] / "data" / "feedback.db"
+
+
+def _feedback_conn():
+    import sqlite3
+
+    FEEDBACK_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(FEEDBACK_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        rating INTEGER NOT NULL,          -- +1 / -1
+        comment TEXT,
+        query TEXT,
+        answer TEXT,
+        grounding_score REAL,
+        judge_score REAL,
+        created TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    return conn
+
+
+class FeedbackBody(BaseModel):
+    thread_id: str
+    rating: int  # +1 or -1
+    comment: Optional[str] = None
+
+
+@app.post("/feedback")
+@limiter.limit("30/minute")
+def feedback(request: Request, body: FeedbackBody):
+    """Record user feedback against the answered thread.
+
+    Negative feedback (and reviewer-edited answers) are the raw material of
+    the self-healing loop: scripts/export_feedback.py turns them into
+    hard-case examples for the next fine-tune (v2 dataset).
+    """
+    if body.rating not in (1, -1):
+        raise HTTPException(422, "rating must be +1 or -1")
+    graph = get_graph()
+    state = graph.get_state({"configurable": {"thread_id": body.thread_id}}).values
+    if not state:
+        raise HTTPException(404, f"unknown thread {body.thread_id}")
+    with _feedback_conn() as conn:
+        conn.execute(
+            "INSERT INTO feedback (thread_id, rating, comment, query, answer,"
+            " grounding_score, judge_score) VALUES (?,?,?,?,?,?,?)",
+            (body.thread_id, body.rating, body.comment,
+             state.get("query"), state.get("final_answer") or state.get("answer"),
+             state.get("grounding_score"), state.get("judge_score")),
+        )
+    logger.info("feedback %+d on thread %s", body.rating, body.thread_id)
+    return {"ok": True}
+
+
+# ── Suggested follow-ups (lazy — fetched after the answer renders) ─────────
+@app.get("/followups/{thread_id}")
+@limiter.limit("20/minute")
+def followups(request: Request, thread_id: str):
+    from agent.nodes.generate import get_llm
+
+    graph = get_graph()
+    state = graph.get_state({"configurable": {"thread_id": thread_id}}).values
+    if not state or not (state.get("final_answer") or state.get("answer")):
+        raise HTTPException(404, f"no answer on thread {thread_id}")
+    prompt = (
+        "Given this claims-adjudication Q&A, suggest exactly 3 short follow-up "
+        "questions the adjudicator would most likely ask next. Respond ONLY "
+        'with JSON: {"questions": ["q1", "q2", "q3"]}.\n\n'
+        f"Q: {state.get('query')}\nA: {state.get('final_answer') or state.get('answer')}"
+    )
+    try:
+        raw = get_llm().chat(
+            [{"role": "user", "content": prompt}],
+            json_mode=True, temperature=0.4, max_tokens=150,
+        )
+        parsed = json.loads(raw)
+        questions = [str(q).strip() for q in parsed.get("questions", []) if str(q).strip()]
+    except Exception as exc:
+        logger.warning("followups failed: %s", exc)
+        questions = []
+    return {"questions": questions[:3]}
 
 
 # ── Health ──────────────────────────────────────────────────────────────────

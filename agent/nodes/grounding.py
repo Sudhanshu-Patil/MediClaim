@@ -156,15 +156,24 @@ def grounding(state: AgentState) -> dict:
                 "ungrounded_sentences": []}
 
     premises = [c["text"][:6000] for c in cited]  # keep full tables (see generate.py)
+    premise_ids = [c["chunk_id"] for c in cited]
     sentences = split_sentences(answer)
     if not sentences:
         return {"grounding_checked": False, "grounding_score": None,
                 "ungrounded_sentences": []}
 
     ungrounded: list[str] = []
+    attributions: list[dict] = []  # which cited chunk grounds each sentence
     for sentence in sentences:
         # Entailed if ANY cited chunk entails it (multi-source answers).
-        best = max(_sentence_grounded_prob(sentence, p) for p in premises)
+        scores = [_sentence_grounded_prob(sentence, p) for p in premises]
+        best = max(scores)
+        best_chunk = premise_ids[scores.index(best)]
+        attributions.append({
+            "sentence": sentence,
+            "chunk_id": best_chunk if best >= settings.entailment_threshold else None,
+            "prob": round(best, 3),
+        })
         if best < settings.entailment_threshold:
             ungrounded.append(sentence)
 
@@ -181,4 +190,5 @@ def grounding(state: AgentState) -> dict:
         "grounding_checked": True,
         "grounding_score": score,
         "ungrounded_sentences": ungrounded,
+        "sentence_attributions": attributions,
     }
