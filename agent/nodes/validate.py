@@ -22,9 +22,15 @@ def validate(state: AgentState) -> dict:
     citations = state.get("citations", [])
     invalid = [c for c in citations if c not in retrieved_ids]
 
+    # Empty answer (e.g. the model answered with only a chunk_id, stripped by
+    # parsing): nothing to ship — route to review for a human-written answer.
+    answer_text = state.get("answer", "")
+    if not answer_text.strip():
+        logger.warning("Validation failed: empty generation")
+        return {"invalid_citations": invalid, "validation_passed": False}
+
     # Generation format failure: the format-locked model occasionally echoes
     # the CONTEXT block instead of answering. Never let that ship as prose.
-    answer_text = state.get("answer", "")
     if any(m in answer_text for m in _ECHO_MARKERS):
         logger.warning("Validation failed: generation echoed context/markup")
         return {"invalid_citations": invalid, "validation_passed": False}

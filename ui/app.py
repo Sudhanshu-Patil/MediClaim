@@ -292,7 +292,10 @@ if ss.pending_review:
     with st.container(border=True):
         st.subheader("⏸️ Human review required")
         st.caption(meta.get("review_reason") or "")
-        st.markdown("**Draft:** " + md_safe(meta.get("answer") or ""))
+        draft = (meta.get("answer") or "").strip()
+        st.markdown("**Draft:** " + (md_safe(draft) if draft else
+                    "*(the model did not produce a usable answer — write one below "
+                    "and Send edited, or Reject)*"))
         edited = st.text_area("Edit the answer (for verdict=edited)",
                               value=meta.get("answer") or "")
         note = st.text_input("Reviewer note")

@@ -84,8 +84,10 @@ def parse_generation(raw: str) -> tuple[str, list[str]]:
         # Strip chunk-id references the model sometimes appends inline.
         answer = _INLINE_CHUNK_REF_RE.sub(" ", answer).strip()
         citations = [_normalize_citation(str(c)) for c in obj.get("citations", []) if c]
-        if answer:
-            return answer, [c for c in citations if c]
+        # Valid JSON NEVER falls through to the raw fallback — an empty
+        # cleaned answer (e.g. the model answered with only a chunk_id) is
+        # returned as empty and flagged by validation, not leaked as raw JSON.
+        return answer, [c for c in citations if c]
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
     # Malformed JSON (e.g. a stray bracket): salvage the fields by regex so
@@ -98,8 +100,9 @@ def parse_generation(raw: str) -> tuple[str, list[str]]:
             _normalize_citation(c)
             for c in re.findall(r'"([0-9a-f]{8}-[0-9a-f-]{27,})"', raw)
         ]
-        if answer:
-            return answer, list(dict.fromkeys(c for c in citations if c))
+        # Same rule: salvaged JSON-ish output returns (possibly empty) prose,
+        # never the raw JSON text.
+        return answer, list(dict.fromkeys(c for c in citations if c))
     # Truly unparseable: whole output becomes the answer with no citations —
     # downstream validation flags it and routes to review.
     return raw.strip(), []
