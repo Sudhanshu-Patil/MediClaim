@@ -51,13 +51,21 @@ def risk_gate(state: AgentState) -> dict:
     if not state.get("validation_passed", True):
         reasons.append("citation validation failed")
     grounding_score = state.get("grounding_score")
+    settings = get_settings()
     if state.get("grounding_checked") and grounding_score is not None:
-        threshold = get_settings().grounding_review_threshold
+        threshold = settings.grounding_review_threshold
         if grounding_score < threshold:
             reasons.append(
                 f"grounding {grounding_score:.2f} < {threshold} "
                 f"({len(state.get('ungrounded_sentences', []))} ungrounded sentence(s))"
             )
+    elif (settings.grounding_enabled and state.get("citations")
+          and state.get("chunks")):
+        # FAIL CLOSED: grounding was enabled and there was something to check,
+        # but no check happened (model load failure, empty premises, crash).
+        # An unverified cited answer must not ship — hard-case testing caught
+        # a fabricated section number shipping through exactly this hole.
+        reasons.append("grounding check did not run on a cited answer")
     if state.get("judge_score", 0.0) < JUDGE_THRESHOLD:
         reasons.append(f"judge score {state.get('judge_score', 0.0):.2f} < {JUDGE_THRESHOLD}")
     if _HIGH_RISK_RE.search(state.get("query", "")):

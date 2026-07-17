@@ -65,11 +65,24 @@ def _normalize_citation(citation: str) -> str:
     return citation.strip()
 
 
+_INLINE_CHUNK_REF_RE = re.compile(r"\s*\[chunk_id=[0-9a-f-]+\]\s*")
+
+
 def parse_generation(raw: str) -> tuple[str, list[str]]:
     """Parse {"answer", "citations"} — salvage what we can from bad JSON."""
     try:
         obj = json.loads(raw)
         answer = str(obj.get("answer", "")).strip()
+        # Double-wrapped JSON (observed in hard-case testing): the answer
+        # value is itself a serialized {"answer": ...} object — unwrap once.
+        if answer.startswith('{"answer"'):
+            try:
+                inner = json.loads(answer)
+                answer = str(inner.get("answer", answer)).strip()
+            except json.JSONDecodeError:
+                pass
+        # Strip chunk-id references the model sometimes appends inline.
+        answer = _INLINE_CHUNK_REF_RE.sub(" ", answer).strip()
         citations = [_normalize_citation(str(c)) for c in obj.get("citations", []) if c]
         if answer:
             return answer, [c for c in citations if c]
