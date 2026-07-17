@@ -204,6 +204,29 @@ resume must happen in the same process). The LLM client has a circuit
 breaker: 3 consecutive failures open the circuit for 30 s (fail fast instead
 of stacking timeouts, README §12).
 
+## 10. Observability (roadmap step 6 — Langfuse + LangSmith)
+
+With `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` in `.env` (project settings
+at http://localhost:3000), every `scripts/ask.py` run emits one
+`medclaim-agent` trace to the self-hosted Langfuse: a span per graph node,
+each Ollama call as a GENERATION with real token counts, and two trace
+scores — `judge_score` and `citation_validation`. Without keys everything
+no-ops (zero overhead, no code paths change).
+
+Browse traces in the Langfuse UI, or via API:
+
+```bash
+curl -u $LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY \
+  "http://localhost:3000/api/public/traces?limit=5"
+```
+
+Version note: the self-hosted server is Langfuse **v2**, so the pinned SDK is
+`langfuse<3` (the v3 SDK only speaks to v3 servers).
+
+LangSmith (dev-time tracing) is zero-code: uncomment `LANGCHAIN_TRACING_V2`,
+`LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` in `.env` and LangGraph traces
+itself to smith.langchain.com.
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging
@@ -230,6 +253,13 @@ of stacking timeouts, README §12).
   `ollama create medclaim-llm -f finetuning/Modelfile.cpu` (runs in system
   RAM; `num_gpu 0`). Partial offload: edit `num_gpu` to the layer count that
   fits.
+- **Judge scores everything 0 / pauses every answer for review**: the 3B
+  model is an erratic numeric judge (Langfuse traces show it e.g. zero-scoring
+  a verbatim quote for "lacking additional context"). It fails safe — answers
+  go to human review, never out the door ungated. Options: set
+  `LLM_JUDGE_MODEL` to a stronger local model, lower `JUDGE_THRESHOLD`, or
+  wait for the NLI grounding check (roadmap step 5) which replaces vibes with
+  entailment.
 - **Celery on Windows** hangs without `--pool=solo`.
 - **`neo4j` unhealthy at first**: it takes ~30–40 s to boot; the healthcheck
   allows for this. Check `docker compose logs neo4j`.

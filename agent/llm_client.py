@@ -68,26 +68,47 @@ class OllamaClient:
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ) -> str:
-        """One chat completion; returns the assistant message content."""
-        self._check_circuit()
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
-        if json_mode:
-            payload["format"] = "json"
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/chat", json=payload, timeout=self.timeout
-            )
-            response.raise_for_status()
-            self._record(ok=True)
-            return response.json()["message"]["content"]
-        except (httpx.HTTPError, KeyError) as exc:
-            self._record(ok=False)
-            raise RuntimeError(f"LLM call failed against {self.base_url}: {exc}") from exc
+        """One chat completion; returns the assistant message content.
+
+        Recorded as a Langfuse generation (model + real Ollama token counts)
+        when tracing is enabled; plain call otherwise.
+        """
+        from observability import tracing
+
+        @tracing.traced("ollama-chat", as_type="generation")
+        def _call() -> str:
+            self._check_circuit()
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            }
+            if json_mode:
+                payload["format"] = "json"
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/api/chat", json=payload, timeout=self.timeout
+                )
+                response.raise_for_status()
+                data = response.json()
+                self._record(ok=True)
+                tracing.update_generation(
+                    model=self.model,
+                    usage={
+                        "input": data.get("prompt_eval_count"),
+                        "output": data.get("eval_count"),
+                    },
+                    metadata={"json_mode": json_mode, "base_url": self.base_url},
+                )
+                return data["message"]["content"]
+            except (httpx.HTTPError, KeyError) as exc:
+                self._record(ok=False)
+                raise RuntimeError(
+                    f"LLM call failed against {self.base_url}: {exc}"
+                ) from exc
+
+        return _call()
 
     def is_available(self) -> bool:
         try:

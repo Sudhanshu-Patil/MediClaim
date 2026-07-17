@@ -29,5 +29,8 @@ langgraph-checkpoint-sqlite>=2.0
 # Optional upgrade: Redis persistence (needs Redis Stack modules)
 # langgraph-checkpoint-redis>=0.0.6
 
+# Observability (roadmap step 6) — v2 SDK to match the self-hosted v2 server
+langfuse>=2.53,<3
+
 # Dev-only: generates the sample test PDF in scripts/generate_sample_pdf.py
 reportlab>=4.1

@@ -141,15 +141,18 @@ def _make_checkpointer():
 
 
 def build_graph(checkpointer=None):
+    from observability.tracing import traced
+
     graph = StateGraph(AgentState)
-    graph.add_node("router", route_query)
-    graph.add_node("retrieve", retrieve)
-    graph.add_node("generate", generate)
-    graph.add_node("validate", validate)
-    graph.add_node("judge", judge)
-    graph.add_node("risk_gate", risk_gate)
-    graph.add_node("hitl_review", hitl_review)
-    graph.add_node("finalize", finalize)
+    # Each node becomes a Langfuse span (identity wrapper when tracing is off).
+    graph.add_node("router", traced("router")(route_query))
+    graph.add_node("retrieve", traced("retrieve")(retrieve))
+    graph.add_node("generate", traced("generate")(generate))
+    graph.add_node("validate", traced("validate")(validate))
+    graph.add_node("judge", traced("judge")(judge))
+    graph.add_node("risk_gate", traced("risk_gate")(risk_gate))
+    graph.add_node("hitl_review", hitl_review)  # interrupt() must not be wrapped
+    graph.add_node("finalize", traced("finalize")(finalize))
 
     graph.add_edge(START, "router")
     graph.add_edge("router", "retrieve")
@@ -163,3 +166,48 @@ def build_graph(checkpointer=None):
     graph.add_edge("finalize", END)
 
     return graph.compile(checkpointer=checkpointer or _make_checkpointer())
+
+
+def run_agent(app, payload, config) -> dict:
+    """Invoke the graph under one root Langfuse trace (README §11).
+
+    Wraps app.invoke so every node span and LLM generation nests under a
+    single "medclaim-agent" trace, attaches route/status metadata, records
+    the judge score as a trace score, and flushes the batch queue (required
+    in short-lived CLI processes). Identical to app.invoke when tracing is
+    off.
+    """
+    from observability import tracing
+
+    if not tracing.enabled():
+        return app.invoke(payload, config)
+
+    @tracing.traced("medclaim-agent")
+    def _run() -> dict:
+        state = app.invoke(payload, config)
+        tracing.update_trace(
+            metadata={
+                "thread_id": config.get("configurable", {}).get("thread_id"),
+                "route": state.get("route"),
+                "status": state.get("status"),
+                "needs_review": state.get("needs_review"),
+                "interrupted": "__interrupt__" in state,
+                "n_chunks": len(state.get("chunks", [])),
+            },
+            tags=["agent"],
+        )
+        if state.get("judge_score") is not None:
+            tracing.score_trace(
+                "judge_score", float(state["judge_score"]),
+                comment=state.get("judge_reason"),
+            )
+        if state.get("validation_passed") is not None:
+            tracing.score_trace(
+                "citation_validation", 1.0 if state["validation_passed"] else 0.0
+            )
+        return state
+
+    try:
+        return _run()
+    finally:
+        tracing.flush()

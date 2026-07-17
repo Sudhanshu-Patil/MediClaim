@@ -65,7 +65,7 @@ def main() -> None:
 
     from langgraph.types import Command
 
-    from agent.graph import build_graph
+    from agent.graph import build_graph, run_agent
 
     app = build_graph()
 
@@ -74,14 +74,14 @@ def main() -> None:
             raise SystemExit("--resume requires --verdict")
         config = {"configurable": {"thread_id": args.resume}}
         payload = {"verdict": args.verdict, "note": args.note, "answer": args.answer}
-        state = app.invoke(Command(resume=payload), config)
+        state = run_agent(app, Command(resume=payload), config)
     else:
         if not args.query:
             raise SystemExit("provide a query (or --resume THREAD_ID)")
         thread_id = args.thread or uuid.uuid4().hex[:12]
         config = {"configurable": {"thread_id": thread_id}}
-        state = app.invoke(
-            {"query": args.query, "source_type": args.source_type}, config
+        state = run_agent(
+            app, {"query": args.query, "source_type": args.source_type}, config
         )
         if "__interrupt__" in state:
             packet = state["__interrupt__"][0].value

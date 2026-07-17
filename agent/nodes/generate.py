@@ -47,14 +47,22 @@ def build_user_message(query: str, chunks: list[dict], max_chunk_chars: int = 35
     return "CONTEXT:\n" + "\n\n".join(blocks) + f"\n\nQUESTION: {query}"
 
 
+def _normalize_citation(citation: str) -> str:
+    """The 3B model sometimes emits "chunk_id=<uuid>" instead of the bare id."""
+    citation = citation.strip().strip("[]")
+    if "=" in citation:
+        citation = citation.split("=", 1)[1]
+    return citation.strip()
+
+
 def parse_generation(raw: str) -> tuple[str, list[str]]:
     """Parse {"answer", "citations"} — salvage what we can from bad JSON."""
     try:
         obj = json.loads(raw)
         answer = str(obj.get("answer", "")).strip()
-        citations = [str(c) for c in obj.get("citations", []) if c]
+        citations = [_normalize_citation(str(c)) for c in obj.get("citations", []) if c]
         if answer:
-            return answer, citations
+            return answer, [c for c in citations if c]
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
     # Not valid JSON: treat the whole output as the answer with no citations —
