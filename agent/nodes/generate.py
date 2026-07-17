@@ -88,8 +88,20 @@ def parse_generation(raw: str) -> tuple[str, list[str]]:
             return answer, [c for c in citations if c]
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
-    # Not valid JSON: treat the whole output as the answer with no citations —
-    # downstream validation will flag it and route to review.
+    # Malformed JSON (e.g. a stray bracket): salvage the fields by regex so
+    # raw JSON text never leaks into the UI as the "answer".
+    answer_match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if answer_match:
+        answer = answer_match.group(1).encode().decode("unicode_escape").strip()
+        answer = _INLINE_CHUNK_REF_RE.sub(" ", answer).strip()
+        citations = [
+            _normalize_citation(c)
+            for c in re.findall(r'"([0-9a-f]{8}-[0-9a-f-]{27,})"', raw)
+        ]
+        if answer:
+            return answer, list(dict.fromkeys(c for c in citations if c))
+    # Truly unparseable: whole output becomes the answer with no citations —
+    # downstream validation flags it and routes to review.
     return raw.strip(), []
 
 

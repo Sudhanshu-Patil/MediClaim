@@ -66,8 +66,14 @@ def risk_gate(state: AgentState) -> dict:
         # An unverified cited answer must not ship — hard-case testing caught
         # a fabricated section number shipping through exactly this hole.
         reasons.append("grounding check did not run on a cited answer")
-    if state.get("judge_score", 0.0) < JUDGE_THRESHOLD:
-        reasons.append(f"judge score {state.get('judge_score', 0.0):.2f} < {JUDGE_THRESHOLD}")
+    # Judge is ADVISORY by default: the 3B judge is measured-unreliable
+    # (zero-scores verbatim-correct answers), and letting it gate everything
+    # produced review fatigue — every answer paused. Its score is still
+    # computed, traced, and shown to reviewers; JUDGE_GATE=blocking restores
+    # gating (e.g. once a stronger LLM_JUDGE_MODEL is configured).
+    if os.getenv("JUDGE_GATE", "advisory") == "blocking":
+        if state.get("judge_score", 0.0) < JUDGE_THRESHOLD:
+            reasons.append(f"judge score {state.get('judge_score', 0.0):.2f} < {JUDGE_THRESHOLD}")
     if _HIGH_RISK_RE.search(state.get("query", "")):
         reasons.append("high-risk query pattern")
     needs_review = bool(reasons)

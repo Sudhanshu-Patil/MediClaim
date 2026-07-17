@@ -162,6 +162,12 @@ def grounding(state: AgentState) -> dict:
         return {"grounding_checked": False, "grounding_score": None,
                 "ungrounded_sentences": []}
 
+    # Fragment fallback: a very short answer ("20%") is a degenerate NLI
+    # hypothesis, and the model often cites prose chunks while the value
+    # lives in the table. Verbatim containment in ANY retrieved chunk is the
+    # strongest grounding evidence available for fragments.
+    all_premises = [(c["chunk_id"], c["text"][:6000]) for c in chunks]
+
     ungrounded: list[str] = []
     attributions: list[dict] = []  # which cited chunk grounds each sentence
     for sentence in sentences:
@@ -169,6 +175,14 @@ def grounding(state: AgentState) -> dict:
         scores = [_sentence_grounded_prob(sentence, p) for p in premises]
         best = max(scores)
         best_chunk = premise_ids[scores.index(best)]
+        if best < settings.entailment_threshold and len(sentence.split()) <= 5:
+            norm = _normalize(sentence)
+            for cid, text in all_premises:
+                if norm and norm in _normalize(text):
+                    best, best_chunk = 1.0, cid
+                    logger.info("Fragment %r grounded by containment in %s",
+                                sentence, cid)
+                    break
         attributions.append({
             "sentence": sentence,
             "chunk_id": best_chunk if best >= settings.entailment_threshold else None,

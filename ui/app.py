@@ -112,18 +112,22 @@ def speak_browser(text: str) -> None:
 
 
 def render_meta(meta: dict, message_key: str) -> None:
-    badge_cols = st.columns(4)
-    grounding = meta.get("grounding_score")
-    judge = meta.get("judge_score")
-    badge_cols[0].metric("Grounding", "—" if grounding is None else f"{grounding:.2f}")
-    badge_cols[1].metric("Judge", "—" if judge is None else f"{judge:.2f}")
-    badge_cols[2].metric("Route", meta.get("route") or "—")
-    badge_cols[3].metric("Status", meta.get("status") or "review")
+    # End users see: PII notice + sources. Scores/route/ungrounded details are
+    # adjudicator diagnostics, hidden behind the sidebar toggle.
     if meta.get("pii_redacted"):
         st.warning(f"PII redacted from your question: {', '.join(meta['pii_redacted'])}")
-    if meta.get("ungrounded_sentences"):
-        st.error("Ungrounded sentences flagged: "
-                 + " | ".join(meta["ungrounded_sentences"][:3]))
+
+    if ss.get("show_diagnostics"):
+        badge_cols = st.columns(4)
+        grounding = meta.get("grounding_score")
+        judge = meta.get("judge_score")
+        badge_cols[0].metric("Grounding", "—" if grounding is None else f"{grounding:.2f}")
+        badge_cols[1].metric("Judge (advisory)", "—" if judge is None else f"{judge:.2f}")
+        badge_cols[2].metric("Route", meta.get("route") or "—")
+        badge_cols[3].metric("Status", meta.get("status") or "review")
+        if meta.get("ungrounded_sentences"):
+            st.error("Ungrounded sentences flagged: "
+                     + " | ".join(meta["ungrounded_sentences"][:3]))
 
     citations = meta.get("citations") or []
     if citations:
@@ -133,14 +137,22 @@ def render_meta(meta: dict, message_key: str) -> None:
                      f"{c.get('section_title') or 'section'}"
                      + (f" (p.{c['page_number']})" if c.get("page_number") else ""))
             with st.expander(label):
-                try:
-                    chunk = httpx.get(f"{API}/chunks/{c['chunk_id']}", timeout=30).json()
-                    st.text(chunk.get("text", "")[:1200])
-                except Exception:
-                    st.caption("chunk text unavailable")
                 if c.get("has_bbox"):
+                    # Cropped to the cited region — the user lands ON the
+                    # evidence, no scrolling through a full page.
                     st.image(f"{API}/source/{c['chunk_id']}/image",
-                             caption="source page, cited region highlighted")
+                             caption=f"cited region — {c.get('doc_name')} "
+                                     f"p.{c.get('page_number')}")
+                    if ss.get("show_diagnostics"):
+                        st.image(f"{API}/source/{c['chunk_id']}/image?crop=0",
+                                 caption="full page")
+                else:
+                    try:
+                        chunk = httpx.get(f"{API}/chunks/{c['chunk_id']}",
+                                          timeout=30).json()
+                        st.text(chunk.get("text", "")[:1200])
+                    except Exception:
+                        st.caption("chunk text unavailable")
 
     # ── feedback row (self-healing flywheel) ────────────────────────────────
     thread_id = meta.get("thread_id")
@@ -244,6 +256,9 @@ with st.sidebar:
                                [None, "policy", "clinical_guideline", "claim_note"],
                                format_func=lambda v: v or "all documents")
     ss.voice_mode = st.radio("Voice", ["off", "browser (instant)", "server (edge-tts)"])
+    ss.show_diagnostics = st.toggle("🔧 Adjudicator diagnostics", value=False,
+                                    help="Show grounding/judge scores, routing, "
+                                         "and full source pages")
 
     st.divider()
     st.subheader("📥 Add a document")

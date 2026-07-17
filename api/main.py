@@ -228,8 +228,14 @@ def get_chunk(request: Request, chunk_id: str):
 
 @app.get("/source/{chunk_id}/image")
 @limiter.limit("30/minute")
-def source_image(request: Request, chunk_id: str, zoom: float = 2.0):
-    """Render the chunk's PDF page with its bbox regions highlighted."""
+def source_image(request: Request, chunk_id: str, zoom: float = 2.0,
+                 crop: int = 1):
+    """Render the chunk's PDF page with its bbox regions highlighted.
+
+    crop=1 (default) returns just the highlighted region plus padding — the
+    UI lands the user ON the cited evidence instead of a full tall page they
+    have to scroll. crop=0 returns the whole page.
+    """
     import fitz  # PyMuPDF
 
     from retrieval.vector_store import QdrantStore
@@ -250,15 +256,26 @@ def source_image(request: Request, chunk_id: str, zoom: float = 2.0):
     try:
         page = pdf[page_no - 1]
         height = page.rect.height
+        rects = []
         for bb in (b for b in bboxes if b["page_no"] == page_no):
             # Docling bboxes are BOTTOMLEFT-origin; PyMuPDF is TOPLEFT.
             if str(bb.get("coord_origin", "")).upper().endswith("BOTTOMLEFT"):
                 rect = fitz.Rect(bb["l"], height - bb["t"], bb["r"], height - bb["b"])
             else:
                 rect = fitz.Rect(bb["l"], bb["t"], bb["r"], bb["b"])
+            rects.append(rect)
             page.draw_rect(rect, color=(0.95, 0.65, 0.1), fill=(1, 0.85, 0.3),
                            fill_opacity=0.25, width=1.5)
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        clip = None
+        if crop and rects:
+            union = rects[0]
+            for rect in rects[1:]:
+                union |= rect
+            pad = 36
+            clip = fitz.Rect(max(0, union.x0 - pad), max(0, union.y0 - pad),
+                             min(page.rect.x1, union.x1 + pad),
+                             min(page.rect.y1, union.y1 + pad))
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip)
         return Response(content=pixmap.tobytes("png"), media_type="image/png")
     finally:
         pdf.close()
