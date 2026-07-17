@@ -36,10 +36,13 @@ def resolve_references(state: AgentState) -> dict:
     have_ids = {c["chunk_id"] for c in chunks}
     have_sections = " ".join(f"§{c.get('section_title') or ''}" for c in chunks).lower()
 
-    # Candidate labels from the query + the retrieved texts themselves.
-    text_pool = state.get("query", "") + " " + " ".join(c["text"][:2000] for c in chunks[:4])
+    # Candidate labels from the USER QUERY only. Scanning retrieved text too
+    # was measured harmful: policy prose mentions sections constantly, so
+    # parent chunks got appended to almost every context — and parent-style
+    # context is out-of-distribution for the current fine-tune (degenerate
+    # babble; same failure family as RETRIEVAL_EXPAND_PARENTS, default off).
     labels: list[str] = []
-    for match in _SECTION_REF_RE.finditer(text_pool):
+    for match in _SECTION_REF_RE.finditer(state.get("query", "")):
         label = match.group(1).rstrip(".")
         if label not in labels:
             labels.append(label)

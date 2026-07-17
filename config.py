@@ -66,7 +66,11 @@ class Settings:
     # Retrieval + reranking (roadmap step 3)
     reranker_model: str = field(default_factory=lambda: _env("RERANKER_MODEL", "BAAI/bge-reranker-base"))
     reranker_enabled: bool = field(default_factory=lambda: _env("RERANKER_ENABLED", "1") == "1")
-    retrieval_top_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_TOP_K", 8))
+    # 6, not 8: measured on the current fine-tune — at 8 context chunks the
+    # model flips into degenerate question-babble (and breaks its JSON
+    # format); at 6 it answers correctly. Another training-distribution
+    # ceiling (dataset examples carried 1-2 context blocks).
+    retrieval_top_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_TOP_K", 6))
     retrieval_vector_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_VECTOR_TOP_N", 20))
     retrieval_graph_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_GRAPH_TOP_N", 20))
     retrieval_rrf_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_RRF_K", 60))

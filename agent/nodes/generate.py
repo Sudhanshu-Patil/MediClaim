@@ -158,17 +158,20 @@ def generate(state: AgentState) -> dict:
     # policy + same question must yield the same answer (and it makes eval
     # runs reproducible).
     llm = get_llm()
+    # 400 tokens caps runaway repetition loops (a correct answer here is
+    # 1-3 sentences; 1024 let a degenerate loop burn ~60s of GPU time).
     if writer is not None and hasattr(llm, "chat_stream"):
         streamer = AnswerFieldStreamer()
         parts: list[str] = []
-        for delta in llm.chat_stream(messages, json_mode=True, temperature=0.0):
+        for delta in llm.chat_stream(messages, json_mode=True, temperature=0.0,
+                                     max_tokens=400):
             parts.append(delta)
             visible = streamer.feed(delta)
             if visible:
                 writer({"token": visible})
         raw = "".join(parts)
     else:
-        raw = llm.chat(messages, json_mode=True, temperature=0.0)
+        raw = llm.chat(messages, json_mode=True, temperature=0.0, max_tokens=400)
 
     answer, citations = parse_generation(raw)
     logger.info("Generated answer (%d chars, %d citations)", len(answer), len(citations))

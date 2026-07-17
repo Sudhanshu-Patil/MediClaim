@@ -85,7 +85,13 @@ class OllamaClient:
                 # Keep the model resident between short-lived CLI runs —
                 # otherwise every cold call pays ~12 s of load time.
                 "keep_alive": os.getenv("LLM_KEEP_ALIVE", "30m"),
-                "options": {"temperature": temperature, "num_predict": max_tokens},
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                    # Brake for the 3B's repetition loops at temperature 0
+                    # (observed live: same 3 sentences looped to token cap).
+                    "repeat_penalty": float(os.getenv("LLM_REPEAT_PENALTY", "1.15")),
+                },
             }
             if json_mode:
                 payload["format"] = "json"
@@ -132,7 +138,11 @@ class OllamaClient:
             "messages": messages,
             "stream": True,
             "keep_alive": os.getenv("LLM_KEEP_ALIVE", "30m"),
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "repeat_penalty": float(os.getenv("LLM_REPEAT_PENALTY", "1.15")),
+            },
         }
         if json_mode:
             payload["format"] = "json"

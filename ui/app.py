@@ -73,6 +73,13 @@ def ask_streaming(query: str, source_type):
                 yield f"\n\n⚠️ {data.get('detail')}"
 
 
+def md_safe(text: str) -> str:
+    """Escape $ so Streamlit's markdown doesn't render '$680.00 ... $136' as
+    LaTeX math (observed live: policy amounts turned whole passages into
+    code-style blocks)."""
+    return (text or "").replace("$", "\\$")
+
+
 def inline_cited_markdown(meta: dict) -> str:
     """Rebuild the answer with [n] inline citation markers per sentence,
     using the NLI sentence→chunk attributions computed by the grounding node."""
@@ -184,7 +191,7 @@ def run_turn(prompt: str, source_type) -> None:
     chat_store.append_message(ss.chat_id, "user", prompt)
     ss.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(md_safe(prompt))
     with st.chat_message("assistant"):
         st.write_stream(ask_streaming(prompt, source_type))
         meta = ss.get("_last_meta") or {}
@@ -261,7 +268,7 @@ st.header("Ask the policy corpus")
 
 for idx, message in enumerate(ss.messages):
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        st.markdown(md_safe(message["content"]))
         if message.get("meta"):
             render_meta(message["meta"], message_key=str(idx))
 
@@ -270,7 +277,7 @@ if ss.pending_review:
     with st.container(border=True):
         st.subheader("⏸️ Human review required")
         st.caption(meta.get("review_reason") or "")
-        st.markdown(f"**Draft:** {meta.get('answer')}")
+        st.markdown("**Draft:** " + md_safe(meta.get("answer") or ""))
         edited = st.text_area("Edit the answer (for verdict=edited)",
                               value=meta.get("answer") or "")
         note = st.text_input("Reviewer note")

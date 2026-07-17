@@ -1,0 +1,5 @@
+[browser]
+# Streamlit phones home anonymous usage stats by default (incl. machine
+# ids and installed agent CLIs) - the updateReport/pageProfile requests
+# visible in devtools. Off.
+gatherUsageStats = false

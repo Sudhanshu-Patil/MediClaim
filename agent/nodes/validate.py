@@ -29,6 +29,18 @@ def validate(state: AgentState) -> dict:
         logger.warning("Validation failed: generation echoed context/markup")
         return {"invalid_citations": invalid, "validation_passed": False}
 
+    # Degenerate repetition: the same 6-word shingle recurring 3+ times means
+    # the model looped (observed live at temperature 0). Flag, don't ship.
+    words = answer_text.lower().split()
+    if len(words) >= 30:
+        shingles: dict[tuple, int] = {}
+        for i in range(len(words) - 5):
+            key = tuple(words[i:i + 6])
+            shingles[key] = shingles.get(key, 0) + 1
+        if max(shingles.values()) >= 3:
+            logger.warning("Validation failed: degenerate repetitive generation")
+            return {"invalid_citations": invalid, "validation_passed": False}
+
     # An answer with no citations is only valid if it says it can't answer —
     # heuristically: refusal-ish wording. Otherwise it's an ungrounded claim.
     passed = not invalid
