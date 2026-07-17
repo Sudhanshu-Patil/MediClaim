@@ -257,6 +257,43 @@ these are lightweight deterministic checks at the node boundary rather than
 the Guardrails AI / NeMo stacks (both pull heavyweight deps); swapping a
 library in later is a one-node change.
 
+## 12. Offline evaluation (roadmap step 7 — RAGAS)
+
+```bash
+python eval/build_golden.py                    # regenerate golden.jsonl from the corpus
+python eval/ragas_eval.py --tag ft-hybrid      # full pipeline
+python eval/ragas_eval.py --tag ft-vector-only --no-graph   # pre-GraphRAG ablation
+python eval/ragas_eval.py --tag base-hybrid --model llama3.2:3b  # pre-fine-tune (needs base model pulled)
+python eval/ragas_eval.py --compare            # markdown comparison table
+```
+
+Metrics per run (saved to `eval/results/<tag>.json`):
+* **context precision / recall** — RAGAS non-LLM variants vs golden reference
+  contexts (deterministic, no evaluator LLM). Tracked separately from
+  faithfulness on purpose (README §8).
+* **faithfulness_nli** — grounded-sentence fraction via the same local NLI
+  used by the live guardrail.
+* **trap_refusal** — unanswerable questions correctly refused.
+* `--llm-metrics` adds RAGAS's LLM-judged faithfulness through local Ollama
+  (noisy with a 3B evaluator; off by default).
+
+Current results (10-question golden set, single-document corpus):
+
+| run | context_precision | context_recall | faithfulness_nli | trap_refusal |
+|---|---|---|---|---|
+| ft-hybrid | 0.944 | 1.0 | 0.556 | 1.0 |
+| ft-vector-only | 0.944 | 1.0 | 0.444 | 1.0 |
+
+Honest reading: retrieval saturates on a corpus this small; the hybrid/graph
+gain (+0.11 faithfulness) comes from better generation context. The
+faithfulness gap itself is real generation weakness the eval surfaced —
+terse fragment answers, one wrong-entity answer, one wrong refusal — which is
+the v2 fine-tuning worklist.
+
+Dependency note: `ragas 0.2.x / langchain-core 0.3.x / langgraph 0.6.x` are
+pinned **as a set** in requirements.txt — moving any one of them alone breaks
+either ragas imports or the HITL `__interrupt__` contract.
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging
