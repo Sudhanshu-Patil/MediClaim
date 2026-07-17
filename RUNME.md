@@ -389,6 +389,54 @@ Claude Desktop config snippet:
                               "args": ["<repo>/agent/mcp_server.py"]}}}
 ```
 
+## 14. Load test + hardening verification (roadmap step 9)
+
+```bash
+python scripts/load_test.py --docs 1500
+```
+
+Measured on this machine (2-core-constrained CPU, single process) with the
+REAL pipeline components (chunker → dense+sparse embedding w/ Redis L3 →
+Qdrant upsert → Neo4j registry):
+
+| measurement | result |
+|---|---|
+| ingestion throughput | 770 docs/min · 25.7 chunks/s |
+| idempotent re-run (1500 docs, all UNCHANGED) | 3.6 s (≈25k docs/min skip path) |
+| freshness at scale (5% revised subset) | 75/75 superseded exactly (asserted); Qdrant 3020 active + 150 superseded |
+| retrieval @ ~3.2k points | p50 364 ms · p95 1.7 s (reranker CPU is the floor, not the index) |
+| circuit breaker | opens after 3 failures; 4th call rejected in 1.9 ms |
+| rate limiting (slowapi) | 70 hammered requests → exactly 60 served, 10× HTTP 429 |
+
+**Honest 100k-doc extrapolation** (not run end-to-end on this laptop):
+embed+upsert extrapolates to ~2.2 h single-process / ~35 min across 4 Celery
+workers. The true bottleneck is **Docling parsing** (~10–20 s/doc CPU,
+measured) — ~100k docs needs parallel workers on real hardware; it is
+embarrassingly parallel and exactly why ingestion is Celery-based (README
+§7). Retrieval: Qdrant's HNSW+quantization is built for 1M+ vectors on one
+node; latency grows logarithmically. Docling parse cost is EXCLUDED from
+the throughput row above (synthetic docs enter pre-parsed) — stated so the
+numbers can't mislead.
+
+### Adversarial hard-case audit (dead-honest)
+
+A 12-case hostile-user suite (multi-hop comparisons, arithmetic, false
+premises, negation logic, typos, vague referents, out-of-corpus temptations,
+rambling+PII, compound questions, citation demands) run through the full
+gated agent:
+
+* raw 3B generation: **~5/12 correct, 2 partial, 5 wrong** — failures are
+  sycophancy on false premises, fabricated elaborations, vague-referent
+  guessing, context echoes. All are training-data problems queued for the
+  v2 fine-tune (the feedback flywheel feeds it).
+* the gate stack is the product: after the fail-closed fixes this audit
+  forced, **0/12 hard cases ship unverified** — every imperfect draft lands
+  in human review with evidence attached. The audit also caught a fabricated
+  section number shipping through a fail-open hole (grounding silently
+  unchecked ⇒ gate passed), now fixed.
+* hard-case latency: 14–93 s (long tail = echo/runaway generations, now
+  flagged by validation).
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging

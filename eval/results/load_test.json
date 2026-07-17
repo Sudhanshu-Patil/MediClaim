@@ -1,0 +1,52 @@
+{
+  "docs_requested": 1500,
+  "retrieval_baseline": {
+    "label": "baseline",
+    "n": 20,
+    "p50_ms": 927,
+    "p95_ms": 1184,
+    "max_ms": 1274
+  },
+  "ingest_initial": {
+    "docs": 1500,
+    "chunks": 3000,
+    "elapsed_s": 116.9,
+    "docs_per_min": 769.7,
+    "chunks_per_s": 25.7,
+    "l3_cache_hits": 0,
+    "l3_cache_misses": 3000,
+    "superseded_docs": 0
+  },
+  "ingest_rerun": {
+    "docs": 1500,
+    "chunks": 0,
+    "elapsed_s": 3.6,
+    "docs_per_min": 24740.1,
+    "chunks_per_s": 0.0,
+    "l3_cache_hits": 0,
+    "l3_cache_misses": 0,
+    "superseded_docs": 0
+  },
+  "ingest_revision": {
+    "docs": 75,
+    "chunks": 150,
+    "elapsed_s": 8.7,
+    "docs_per_min": 519.9,
+    "chunks_per_s": 17.3,
+    "l3_cache_hits": 0,
+    "l3_cache_misses": 150,
+    "superseded_docs": 75
+  },
+  "qdrant": {
+    "total_points": 3170,
+    "active": 3020,
+    "superseded": 150
+  },
+  "retrieval_loaded": {
+    "label": "loaded",
+    "n": 20,
+    "p50_ms": 364,
+    "p95_ms": 1692,
+    "max_ms": 1724
+  }
+}
