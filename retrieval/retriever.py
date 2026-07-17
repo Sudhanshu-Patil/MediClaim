@@ -97,29 +97,49 @@ class HybridRetriever:
                 source_type=source_type,
             )
 
-        graph_ranked: list[str] = []
-        if use_graph:
-            from concurrent.futures import ThreadPoolExecutor
+        def _sparse_branch() -> list[dict]:
+            # BM25 lexical arm: exact codes/names that embeddings blur.
+            indices, values = self.embedder.embed_query_sparse(query)
+            if not indices:
+                return []
+            return self.vectors.search_sparse(
+                indices, values,
+                top_n=s.retrieval_vector_top_n,
+                chunk_types=_RETRIEVABLE_CHUNK_TYPES,
+                source_type=source_type,
+            )
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                vector_future = pool.submit(_vector_branch)
-                graph_future = pool.submit(
-                    self.graph.graph_search, query,
-                    top_n=s.retrieval_graph_top_n, source_type=source_type,
-                )
-                vector_hits = vector_future.result()
+        from concurrent.futures import ThreadPoolExecutor
+
+        graph_ranked: list[str] = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            vector_future = pool.submit(_vector_branch)
+            sparse_future = pool.submit(_sparse_branch)
+            graph_future = (
+                pool.submit(self.graph.graph_search, query,
+                            top_n=s.retrieval_graph_top_n, source_type=source_type)
+                if use_graph else None
+            )
+            vector_hits = vector_future.result()
+            sparse_hits = sparse_future.result()
+            if graph_future is not None:
                 graph_ranked = [h["chunk_id"] for h in graph_future.result()]
-        else:
-            vector_hits = _vector_branch()
 
         payloads: dict[str, dict] = {h["chunk_id"]: h["payload"] for h in vector_hits}
+        payloads.update({h["chunk_id"]: h["payload"] for h in sparse_hits})
         vector_ranked = [h["chunk_id"] for h in vector_hits]
+        sparse_ranked = [h["chunk_id"] for h in sparse_hits]
 
-        # ── 3. RRF fusion ───────────────────────────────────────────────────
-        fused = rrf_fuse(
-            [vector_ranked, graph_ranked] if graph_ranked else [vector_ranked],
-            k=s.retrieval_rrf_k,
-        )
+        # ── 3. RRF fusion (dense ∥ sparse-BM25 ∥ graph) ─────────────────────
+        # Sparse is down-weighted: its job is exact identifiers (OP-codes,
+        # names) where it dominates anyway; at full weight it reorders
+        # natural-language contexts enough to destabilize the 3B's answers
+        # (measured: -0.22 NLI faithfulness on the golden set).
+        lists_weights = [(vector_ranked, 1.0), (sparse_ranked, s.retrieval_sparse_weight),
+                         (graph_ranked, 1.0)]
+        ranked_lists = [lst for lst, _ in lists_weights if lst]
+        weights = [w for lst, w in lists_weights if lst]
+        fused = rrf_fuse(ranked_lists, k=s.retrieval_rrf_k, weights=weights)
         candidates = fused[: s.retrieval_rerank_candidates]
 
         # Fetch payloads for graph-only hits, then drop candidates that have
@@ -165,8 +185,34 @@ class HybridRetriever:
         else:
             results = [(cid, sc, sc) for cid, sc in candidates[:top_k]]
 
+        # ── 5b. Parent expansion: retrieve small (children matched/reranked),
+        #       READ BIG — swap each child for its full parent section so the
+        #       generator sees complete context. Dedup keeps the best rank
+        #       when siblings share a parent. Tables stay as-is (atomic).
+        if s.retrieval_expand_parents:
+            parent_ids = {
+                payloads[cid].get("parent_chunk_id")
+                for cid, *_ in results
+                if payloads[cid].get("chunk_type") == "child"
+                and payloads[cid].get("parent_chunk_id")
+            }
+            payloads.update(self.vectors.retrieve(
+                [pid for pid in parent_ids if pid and pid not in payloads]
+            ))
+            expanded: list[tuple[str, float, float]] = []
+            seen_final: set[str] = set()
+            for cid, score, fused_score in results:
+                p = payloads[cid]
+                if p.get("chunk_type") == "child" and p.get("parent_chunk_id") in payloads:
+                    cid = p["parent_chunk_id"]
+                if cid not in seen_final:
+                    seen_final.add(cid)
+                    expanded.append((cid, score, fused_score))
+            results = expanded
+
         # ── 6. Materialize with citation metadata ───────────────────────────
         graph_set, vector_set = set(graph_ranked), set(vector_ranked)
+        sparse_set = set(sparse_ranked)
         retrieved = []
         for cid, score, fused_score in results:
             p = payloads[cid]
@@ -188,8 +234,10 @@ class HybridRetriever:
                     bbox=p.get("bbox"),
                     parent_chunk_id=p.get("parent_chunk_id"),
                     sources=[
-                        s for s, present in
-                        (("vector", cid in vector_set), ("graph", cid in graph_set))
+                        name for name, present in
+                        (("vector", cid in vector_set),
+                         ("sparse", cid in sparse_set),
+                         ("graph", cid in graph_set))
                         if present
                     ],
                 )

@@ -88,6 +88,17 @@ def main() -> None:
             "answerable": True,
         })
 
+    # ── Exact-code lookups (the sparse/BM25 arm's job) ──────────────────────
+    for code, desc, benefit, copay, auth in (r[:5] for r in (rows[25], rows[33])
+                                             if len(r) >= 5):
+        samples.append({
+            "question": f"What does procedure code {code} cover and what is the copay?",
+            "reference": f"{code} covers {desc.lower()} with a copay of {copay} "
+                         f"and a maximum benefit of {benefit} USD.",
+            "reference_contexts": [table["text"]],
+            "answerable": True,
+        })
+
     # ── Trap: not answerable from the corpus ────────────────────────────────
     samples.append({
         "question": "What is the annual out-of-pocket maximum for a family plan?",

@@ -44,15 +44,24 @@ class QdrantStore:
 
     # ── Schema ──────────────────────────────────────────────────────────────
     def ensure_collection(self) -> None:
-        """Create the collection + payload indexes if missing. Idempotent."""
+        """Create the collection + payload indexes if missing. Idempotent.
+
+        Schema: named dense vector ("dense", bge cosine) + named sparse
+        vector ("bm25", server-side IDF) — true dense+sparse hybrid across
+        ALL source types (the Neo4j Lucene arm only covers graph-scoped docs).
+        """
         if not self.client.collection_exists(self.collection):
-            logger.info("Creating Qdrant collection %s", self.collection)
+            logger.info("Creating Qdrant collection %s (dense+bm25)", self.collection)
             self.client.create_collection(
                 collection_name=self.collection,
-                vectors_config=qm.VectorParams(
-                    size=self.vector_size,
-                    distance=qm.Distance.COSINE,
-                ),
+                vectors_config={
+                    "dense": qm.VectorParams(
+                        size=self.vector_size, distance=qm.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config={
+                    "bm25": qm.SparseVectorParams(modifier=qm.Modifier.IDF)
+                },
                 # Scalar quantization: README §7 — millions of vectors on one
                 # local instance.
                 quantization_config=qm.ScalarQuantization(
@@ -61,6 +70,15 @@ class QdrantStore:
                     )
                 ),
             )
+        else:
+            info = self.client.get_collection(self.collection)
+            if not (info.config.params.sparse_vectors or {}).get("bm25"):
+                logger.critical(
+                    "Collection %s predates the sparse-BM25 schema. Sparse "
+                    "retrieval is DISABLED until you recreate + re-ingest: "
+                    "curl -X DELETE .../collections/%s && re-run ingestion.",
+                    self.collection, self.collection,
+                )
         for field, schema in _PAYLOAD_INDEXES.items():
             try:
                 self.client.create_payload_index(
@@ -77,22 +95,25 @@ class QdrantStore:
         ids: Sequence[str],
         vectors: Sequence[Sequence[float]],
         payloads: Sequence[dict],
+        sparse_vectors: Optional[Sequence[tuple[list[int], list[float]]]] = None,
         batch_size: int = 128,
     ) -> int:
         """Batched upsert. Deterministic IDs make re-runs overwrite, not duplicate."""
         total = 0
         for start in range(0, len(ids), batch_size):
             end = start + batch_size
-            self.client.upsert(
-                collection_name=self.collection,
-                points=qm.Batch(
-                    ids=list(ids[start:end]),
-                    vectors=[list(v) for v in vectors[start:end]],
-                    payloads=list(payloads[start:end]),
-                ),
-                wait=True,
-            )
-            total += len(ids[start:end])
+            points = []
+            for offset, point_id in enumerate(ids[start:end]):
+                i = start + offset
+                vector: dict = {"dense": list(vectors[i])}
+                if sparse_vectors is not None:
+                    indices, values = sparse_vectors[i]
+                    vector["bm25"] = qm.SparseVector(indices=indices, values=values)
+                points.append(qm.PointStruct(id=point_id, vector=vector,
+                                             payload=payloads[i]))
+            self.client.upsert(collection_name=self.collection, points=points,
+                               wait=True)
+            total += len(points)
         logger.info("Upserted %d points into %s", total, self.collection)
         return total
 
@@ -146,10 +167,49 @@ class QdrantStore:
         result = self.client.query_points(
             collection_name=self.collection,
             query=list(query_vector),
+            using="dense",
             query_filter=qm.Filter(must=must),
             limit=top_n,
             with_payload=True,
         )
+        return [
+            {"chunk_id": str(p.id), "score": p.score, "payload": p.payload}
+            for p in result.points
+        ]
+
+    def search_sparse(
+        self,
+        indices: list[int],
+        values: list[float],
+        top_n: int = 20,
+        status: str = "active",
+        chunk_types: Optional[Sequence[str]] = None,
+        source_type: Optional[str] = None,
+    ) -> list[dict]:
+        """BM25 sparse search — the lexical arm of hybrid retrieval (exact
+        codes, names, serial-style tokens that embeddings blur)."""
+        must: list[qm.Condition] = [
+            qm.FieldCondition(key="status", match=qm.MatchValue(value=status))
+        ]
+        if chunk_types:
+            must.append(qm.FieldCondition(key="chunk_type",
+                                          match=qm.MatchAny(any=list(chunk_types))))
+        if source_type:
+            must.append(qm.FieldCondition(key="source_type",
+                                          match=qm.MatchValue(value=source_type)))
+        try:
+            result = self.client.query_points(
+                collection_name=self.collection,
+                query=qm.SparseVector(indices=indices, values=values),
+                using="bm25",
+                query_filter=qm.Filter(must=must),
+                limit=top_n,
+                with_payload=True,
+            )
+        except Exception:
+            logger.warning("sparse search unavailable (old collection schema?)",
+                           exc_info=True)
+            return []
         return [
             {"chunk_id": str(p.id), "score": p.score, "payload": p.payload}
             for p in result.points

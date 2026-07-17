@@ -112,8 +112,15 @@ def finalize(state: AgentState) -> dict:
     # Strip citations that failed validation rather than shipping bad ones.
     invalid = set(state.get("invalid_citations", []))
     citations = [c for c in state.get("citations", []) if c not in invalid]
+    # Output-side PII guard (README §10): source documents (claim notes) can
+    # themselves contain member PII — never let it leave in an answer.
+    from agent.nodes.input_guard import redact_pii
+
+    answer, leaked = redact_pii(state.get("answer", ""))
+    if leaked:
+        logger.warning("Output PII redacted from answer: %s", leaked)
     return {
-        "final_answer": state.get("answer", ""),
+        "final_answer": answer,
         "final_citations": citations,
         "status": "answered",
     }

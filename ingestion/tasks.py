@@ -120,11 +120,14 @@ def run_ingestion(
                     {"kind": e.kind, "target_label": e.target_label, "raw_text": e.raw_text}
                 )
 
-        # 5 ── Embed, consulting the Redis L3 cache (README §6)
+        # 5 ── Embed, consulting the Redis L3 cache (README §6).
+        #      Dense (bge) + sparse BM25 (lexical arm for hybrid retrieval —
+        #      tokenization-only, no cache needed).
         embedder = CachedEmbedder()
         vectors = embedder.embed(
             [c.text for c in chunks], [c.metadata.chunk_hash for c in chunks]
         )
+        sparse_vectors = embedder.embed_sparse([c.text for c in chunks])
 
         # 6 ── Qdrant upsert (deterministic IDs → idempotent)
         payloads = []
@@ -138,6 +141,7 @@ def run_ingestion(
             payloads.append(payload)
         vector_store.upsert_chunks(
             [c.chunk_id for c in chunks], vectors, payloads,
+            sparse_vectors=sparse_vectors,
             batch_size=settings.embed_batch_size,
         )
 

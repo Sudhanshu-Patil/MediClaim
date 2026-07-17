@@ -70,6 +70,13 @@ class Settings:
     retrieval_vector_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_VECTOR_TOP_N", 20))
     retrieval_graph_top_n: int = field(default_factory=lambda: _env_int("RETRIEVAL_GRAPH_TOP_N", 20))
     retrieval_rrf_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_RRF_K", 60))
+    retrieval_sparse_weight: float = field(default_factory=lambda: float(_env("RETRIEVAL_SPARSE_WEIGHT", "0.5")))
+    # Retrieve small, read big: match/rerank on children, feed the generator
+    # their full parent sections. DEFAULT OFF — measured with the current
+    # fine-tune: parent-style contexts are out-of-distribution for a model
+    # trained on child/table contexts (trap refusal 1.0 -> 0.0, one context
+    # echo). Enable after a v2 fine-tune whose data includes parent contexts.
+    retrieval_expand_parents: bool = field(default_factory=lambda: _env("RETRIEVAL_EXPAND_PARENTS", "0") == "1")
     # 16, not fewer: trimming to 12 was measured to cost 0.17 context
     # precision on the golden set for ~400 ms — not a good trade. The
     # cross-encoder pass is the retrieval latency floor (~100 ms/candidate).

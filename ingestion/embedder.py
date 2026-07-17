@@ -83,6 +83,26 @@ class CachedEmbedder:
         )
         return [v for v in vectors if v is not None]
 
+    # ── Sparse BM25 (hybrid retrieval's lexical arm; no cache needed —
+    #    tokenization-only, no neural model, microseconds per text) ─────────
+    _sparse_model = None
+
+    def _get_sparse(self):
+        if CachedEmbedder._sparse_model is None:
+            from fastembed import SparseTextEmbedding
+
+            logger.info("Loading sparse BM25 model Qdrant/bm25")
+            CachedEmbedder._sparse_model = SparseTextEmbedding("Qdrant/bm25")
+        return CachedEmbedder._sparse_model
+
+    def embed_sparse(self, texts: Sequence[str]) -> list[tuple[list[int], list[float]]]:
+        return [(e.indices.tolist(), e.values.tolist())
+                for e in self._get_sparse().embed(list(texts))]
+
+    def embed_query_sparse(self, query: str) -> tuple[list[int], list[float]]:
+        e = next(iter(self._get_sparse().query_embed(query)))
+        return e.indices.tolist(), e.values.tolist()
+
     def embed_query(self, query: str) -> list[float]:
         """Query-side embedding (retrieval).
 

@@ -309,6 +309,25 @@ Dependency note: `ragas 0.2.x / langchain-core 0.3.x / langgraph 0.6.x` are
 pinned **as a set** in requirements.txt — moving any one of them alone breaks
 either ragas imports or the HITL `__interrupt__` contract.
 
+### Backend techniques: adopted vs deliberately skipped (all measured)
+
+| Technique | Decision |
+|---|---|
+| Sparse BM25 + dense hybrid | **Adopted**: Qdrant named dense+bm25 vectors, third RRF arm at weight 0.5 (`RETRIEVAL_SPARSE_WEIGHT`). Isolation-ablated: zero cost on prose queries, wins exact-identifier lookups (context precision 0.944→0.955 with code queries in the golden set). Note: adding sparse requires the dense+bm25 collection schema — recreate + re-ingest when upgrading from an older collection. |
+| Parent-child "read big" expansion | **Built, default OFF** (`RETRIEVAL_EXPAND_PARENTS`): measured trap-refusal 1.0→0.0 and context echo — parent-style contexts are out-of-distribution for the current fine-tune (trained on child/table contexts). Enable after a v2 fine-tune that includes parent-context examples. |
+| Output-side PII redaction | **Adopted** in finalize — source claim notes may contain member PII. |
+| Semantic chunking | Have the layout-boundary variant (Docling structure + sentence windows) — better fit for structured policy docs than embedding-shift splitting. |
+| Multimodal parsing (Unstructured/LlamaParse) | Docling+TableFormer is the stronger OSS option; LlamaParse is a paid API (breaks zero-cost). |
+| Context compression (LLMLingua) | Skipped: spends a model pass to save tokens that cost nothing locally; net latency loss. |
+| Query rewriting/expansion | Skipped for now: +2–4 s/query on the 3B vs retrieval already at 0.955/1.0. Revisit if scale-eval recall drops. |
+| Cohere/OpenAI embeddings & rerank | Paid APIs — replaced by local bge + BGE/MiniLM reranker. |
+| NeMo/Llama Guard | Lighter local equivalents in place (deterministic input guards, citation validation, NLI grounding, judge, HITL); Llama Guard 8B exceeds this machine. |
+
+Known model-level fragility (v2 fine-tune worklist): refusal behavior on
+unanswerable questions flips with context ordering (only 6 refusal examples
+in training data), and terse fragment answers depress NLI faithfulness. Both
+are caught in production by the grounding gate → human review.
+
 ## 13. API + UI + MCP server (roadmap step 8)
 
 ```bash
