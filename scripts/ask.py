@@ -40,6 +40,11 @@ def print_result(state: dict) -> None:
                   f"{c.get('section_title')} {loc})")
     if state.get("judge_score") is not None:
         print(f"JUDGE: {state.get('judge_score')} ({state.get('judge_reason','')})")
+    if state.get("grounding_checked"):
+        print(f"GROUNDING: {state.get('grounding_score')} "
+              f"({len(state.get('ungrounded_sentences', []))} ungrounded sentence(s))")
+    if state.get("pii_redacted"):
+        print(f"PII REDACTED: {', '.join(state['pii_redacted'])}")
 
 
 def main() -> None:
@@ -93,7 +98,8 @@ def main() -> None:
 
     if args.json:
         keep = ("status", "final_answer", "final_citations", "judge_score",
-                "judge_reason", "reviewer_verdict", "route")
+                "judge_reason", "reviewer_verdict", "route", "grounding_score",
+                "ungrounded_sentences", "pii_redacted", "input_block_reason")
         print(json.dumps({k: state.get(k) for k in keep}, indent=2))
     else:
         print_result(state)

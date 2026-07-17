@@ -72,6 +72,14 @@ class Settings:
     retrieval_rrf_k: int = field(default_factory=lambda: _env_int("RETRIEVAL_RRF_K", 60))
     retrieval_rerank_candidates: int = field(default_factory=lambda: _env_int("RETRIEVAL_RERANK_CANDIDATES", 16))
 
+    # Grounding / NLI entailment check (roadmap step 5, README §8)
+    grounding_model: str = field(default_factory=lambda: _env("GROUNDING_MODEL", "cross-encoder/nli-deberta-v3-xsmall"))
+    grounding_enabled: bool = field(default_factory=lambda: _env("GROUNDING_ENABLED", "1") == "1")
+    # Per-sentence entailment probability below this = ungrounded sentence.
+    entailment_threshold: float = field(default_factory=lambda: float(_env("ENTAILMENT_THRESHOLD", "0.5")))
+    # Grounded fraction below this routes the answer to human review.
+    grounding_review_threshold: float = field(default_factory=lambda: float(_env("GROUNDING_REVIEW_THRESHOLD", "0.8")))
+
     # GraphRAG scoping (README §3)
     graph_scoped_source_types: frozenset[str] = field(
         default_factory=lambda: frozenset(

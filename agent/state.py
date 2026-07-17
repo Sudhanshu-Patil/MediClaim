@@ -26,6 +26,11 @@ class AgentState(TypedDict, total=False):
     query: str
     source_type: Optional[str]
 
+    # input guardrails (README §10)
+    input_blocked: bool
+    input_block_reason: Optional[str]
+    pii_redacted: list[str]         # kinds of PII redacted from the query
+
     # router
     route: str                      # "vector" | "graph" | "hybrid"
 
@@ -37,9 +42,14 @@ class AgentState(TypedDict, total=False):
     citations: list[str]
     generation_raw: str             # unparsed model output, for tracing
 
-    # validation (schema-level; NLI grounding arrives in step 5)
+    # validation (schema-level)
     invalid_citations: list[str]
     validation_passed: bool
+
+    # grounding (README §8: per-sentence NLI entailment vs cited chunks)
+    grounding_checked: bool
+    grounding_score: Optional[float]     # fraction of sentences entailed, 0..1
+    ungrounded_sentences: list[str]      # hallucination flags
 
     # judge
     judge_score: float              # 0..1

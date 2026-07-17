@@ -24,6 +24,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from agent.nodes.generate import generate
+from agent.nodes.grounding import grounding
+from agent.nodes.input_guard import input_guard
 from agent.nodes.judge import judge
 from agent.nodes.retrieve import retrieve
 from agent.nodes.router import route_query
@@ -42,9 +44,19 @@ _HIGH_RISK_RE = re.compile(
 
 
 def risk_gate(state: AgentState) -> dict:
+    from config import get_settings
+
     reasons = []
     if not state.get("validation_passed", True):
         reasons.append("citation validation failed")
+    grounding_score = state.get("grounding_score")
+    if state.get("grounding_checked") and grounding_score is not None:
+        threshold = get_settings().grounding_review_threshold
+        if grounding_score < threshold:
+            reasons.append(
+                f"grounding {grounding_score:.2f} < {threshold} "
+                f"({len(state.get('ungrounded_sentences', []))} ungrounded sentence(s))"
+            )
     if state.get("judge_score", 0.0) < JUDGE_THRESHOLD:
         reasons.append(f"judge score {state.get('judge_score', 0.0):.2f} < {JUDGE_THRESHOLD}")
     if _HIGH_RISK_RE.search(state.get("query", "")):
@@ -82,6 +94,13 @@ def hitl_review(state: AgentState) -> dict:
 
 
 def finalize(state: AgentState) -> dict:
+    if state.get("input_blocked"):
+        return {
+            "final_answer": "This request was blocked by input guardrails: "
+            + (state.get("input_block_reason") or "policy violation"),
+            "final_citations": [],
+            "status": "blocked",
+        }
     if state.get("reviewer_verdict") == "rejected":
         return {
             "final_answer": "This response was rejected by a human reviewer."
@@ -145,20 +164,28 @@ def build_graph(checkpointer=None):
 
     graph = StateGraph(AgentState)
     # Each node becomes a Langfuse span (identity wrapper when tracing is off).
+    graph.add_node("input_guard", traced("input_guard")(input_guard))
     graph.add_node("router", traced("router")(route_query))
     graph.add_node("retrieve", traced("retrieve")(retrieve))
     graph.add_node("generate", traced("generate")(generate))
     graph.add_node("validate", traced("validate")(validate))
+    graph.add_node("grounding", traced("grounding")(grounding))
     graph.add_node("judge", traced("judge")(judge))
     graph.add_node("risk_gate", traced("risk_gate")(risk_gate))
     graph.add_node("hitl_review", hitl_review)  # interrupt() must not be wrapped
     graph.add_node("finalize", traced("finalize")(finalize))
 
-    graph.add_edge(START, "router")
+    graph.add_edge(START, "input_guard")
+    graph.add_conditional_edges(
+        "input_guard",
+        lambda s: "finalize" if s.get("input_blocked") else "router",
+        {"finalize": "finalize", "router": "router"},
+    )
     graph.add_edge("router", "retrieve")
     graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", "validate")
-    graph.add_edge("validate", "judge")
+    graph.add_edge("validate", "grounding")
+    graph.add_edge("grounding", "judge")
     graph.add_edge("judge", "risk_gate")
     graph.add_conditional_edges("risk_gate", _after_risk_gate,
                                 {"hitl_review": "hitl_review", "finalize": "finalize"})
@@ -204,6 +231,11 @@ def run_agent(app, payload, config) -> dict:
         if state.get("validation_passed") is not None:
             tracing.score_trace(
                 "citation_validation", 1.0 if state["validation_passed"] else 0.0
+            )
+        if state.get("grounding_score") is not None:
+            tracing.score_trace(
+                "grounding_score", float(state["grounding_score"]),
+                comment=("; ".join(state.get("ungrounded_sentences", []))[:200] or None),
             )
         return state
 
