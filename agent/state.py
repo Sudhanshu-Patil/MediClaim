@@ -57,8 +57,9 @@ class AgentState(TypedDict, total=False):
     judge_score: float              # 0..1
     judge_reason: str
 
-    # HITL
+    # HITL / clarification
     needs_review: bool
+    needs_clarification: bool   # ambiguous question → ask the USER, not a reviewer
     review_reason: str
     reviewer_verdict: Optional[str]  # "approved" | "edited" | "rejected"
     reviewer_note: Optional[str]

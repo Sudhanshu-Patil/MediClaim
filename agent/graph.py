@@ -76,6 +76,18 @@ def risk_gate(state: AgentState) -> dict:
             reasons.append(f"judge score {state.get('judge_score', 0.0):.2f} < {JUDGE_THRESHOLD}")
     if _HIGH_RISK_RE.search(state.get("query", "")):
         reasons.append("high-risk query pattern")
+
+    # Uncited few-word guess ("Yes" to an ambiguous question): the person who
+    # can fix an ambiguous question is the USER, not a reviewer — route to a
+    # clarification response instead of burning HITL attention. Never applies
+    # to high-risk queries or anything with citations.
+    answer = (state.get("answer") or "").strip()
+    if (reasons and not state.get("citations") and answer
+            and len(answer.split()) <= 3
+            and not _HIGH_RISK_RE.search(state.get("query", ""))):
+        return {"needs_review": False, "needs_clarification": True,
+                "review_reason": ""}
+
     needs_review = bool(reasons)
     return {"needs_review": needs_review, "review_reason": "; ".join(reasons)}
 
@@ -109,6 +121,18 @@ def hitl_review(state: AgentState) -> dict:
 
 
 def finalize(state: AgentState) -> dict:
+    if state.get("needs_clarification"):
+        query = state.get("query", "your question")
+        return {
+            "final_answer": (
+                f'I need a bit more detail to answer "{query}" reliably — the '
+                "policy's rules differ by procedure and section. Please add the "
+                "specific procedure, code, or section (for example: "
+                '"Is prior authorization required for an MRI of the brain?").'
+            ),
+            "final_citations": [],
+            "status": "needs_clarification",
+        }
     if state.get("input_blocked"):
         return {
             "final_answer": "This request was blocked by input guardrails: "
