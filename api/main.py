@@ -251,11 +251,23 @@ def list_documents(request: Request, source_type: Optional[str] = None):
 
 
 @app.get("/documents/{doc_id}/file")
-@limiter.limit("20/minute")
-def document_file(request: Request, doc_id: str):
-    """Serve the ENTIRE source file — inline for PDFs (browser's native
-    viewer renders every page, scrollable/zoomable), attachment download for
-    DOCX/PPTX (no in-browser renderer for those without extra JS libraries)."""
+@limiter.exempt
+def document_file(request: Request, doc_id: str, download: bool = False):
+    """Serve the ENTIRE source file (Range-request capable — Starlette's
+    FileResponse handles 206 Partial Content natively).
+
+    Rate-limiting EXEMPT: confirmed live that Chrome's PDF viewer issues 20+
+    byte-range GETs to progressively load a single PDF (thumbnails, search
+    index, page prefetch) — a 20/minute cap on this route was measured
+    truncating that mid-load, which Chrome then rendered as a broken/blocked
+    document. A client re-requesting ranges of a file it's already
+    authorized to read gains nothing by "abusing" this route, so exemption
+    is correct here, not just a workaround.
+
+    PDFs default to inline (Content-Disposition: inline) for iframe/tab
+    display; DOCX/PPTX always download (no in-browser renderer available).
+    Any file downloads when ?download=true is passed, PDF included.
+    """
     from retrieval.vector_store import QdrantStore
 
     doc_name = QdrantStore().get_document_name(doc_id)
@@ -266,7 +278,7 @@ def document_file(request: Request, doc_id: str):
         raise HTTPException(404, f"source file {doc_name} not found on server")
 
     media_type = _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
-    disposition = "inline" if path.suffix.lower() == ".pdf" else "attachment"
+    disposition = "attachment" if (download or path.suffix.lower() != ".pdf") else "inline"
     return FileResponse(
         path, media_type=media_type,
         headers={"Content-Disposition": f'{disposition}; filename="{path.name}"'},
