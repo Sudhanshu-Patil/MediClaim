@@ -1,0 +1,50 @@
+# Roadmap step 10 (free-tier deployment): Qdrant Cloud and Neo4j Aura Free
+# don't just sleep when idle — Qdrant free clusters SUSPEND after 1 week idle
+# and are DELETED after 4 weeks; Aura Free instances are PAUSED after
+# inactivity and DELETED after 30 days without activity. A portfolio demo
+# that goes unvisited for a few weeks would otherwise silently lose its data.
+#
+# This workflow pings both on a schedule well inside those windows — cheap
+# read-only requests, not real traffic — so "free" doesn't quietly become
+# "gone". GitHub Actions itself is free for this (a few seconds, twice a
+# week, is nowhere near the free-tier minutes cap).
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   QDRANT_URL, QDRANT_API_KEY, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+
+name: keep-alive (Qdrant Cloud + Neo4j Aura)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1,4"   # Monday and Thursday, 06:00 UTC
+  workflow_dispatch: {}       # manual trigger from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Qdrant Cloud
+        run: |
+          curl -sf -H "api-key: ${{ secrets.QDRANT_API_KEY }}" \
+            "${{ secrets.QDRANT_URL }}/collections" > /dev/null \
+            && echo "Qdrant: reached" || echo "::warning::Qdrant ping failed"
+
+      - name: Ping Neo4j Aura
+        run: |
+          pip install --quiet neo4j
+          python - <<'PY'
+          import os
+          from neo4j import GraphDatabase
+          driver = GraphDatabase.driver(
+              os.environ["NEO4J_URI"],
+              auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]),
+          )
+          with driver.session() as session:
+              session.run("RETURN 1").consume()
+          driver.close()
+          print("Neo4j: reached")
+          PY
+        env:
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USER: ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}

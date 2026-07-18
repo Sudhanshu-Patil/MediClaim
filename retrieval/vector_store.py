@@ -36,11 +36,17 @@ class QdrantStore:
         url: Optional[str] = None,
         collection: Optional[str] = None,
         vector_size: Optional[int] = None,
+        api_key: Optional[str] = None,
     ) -> None:
         settings = get_settings()
         self.collection = collection or settings.qdrant_collection
         self.vector_size = vector_size or settings.embedding_dim
-        self.client = QdrantClient(url=url or settings.qdrant_url)
+        # api_key is None for local Docker Qdrant (no auth); Qdrant Cloud
+        # requires it — QdrantClient accepts api_key=None harmlessly.
+        self.client = QdrantClient(
+            url=url or settings.qdrant_url,
+            api_key=api_key or settings.qdrant_api_key,
+        )
 
     # ── Schema ──────────────────────────────────────────────────────────────
     def ensure_collection(self) -> None:

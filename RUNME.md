@@ -437,6 +437,65 @@ gated agent:
 * hard-case latency: 14–93 s (long tail = echo/runaway generations, now
   flagged by validation).
 
+## 15. Free-tier live deployment (roadmap step 10)
+
+Zero-cost, no-credit-card-anywhere architecture, deliberately embracing
+sleep/cold-start instead of paying for always-on:
+
+| Layer | Service | Free tier | Idle behavior |
+|---|---|---|---|
+| Vector store | Qdrant Cloud | 1 GB cluster, no card | suspends after 1 week idle, **deleted after 4 weeks** |
+| Graph store | Neo4j AuraDB Free | no card | paused after inactivity, **deleted after 30 days** |
+| Redis (L3 cache) | Upstash Redis | no card | always-on (serverless, no sleep) |
+| Agent + API + LLM | Hugging Face Space (Docker, CPU Basic) | no card | sleeps after inactivity, cold-starts on next request |
+| UI | Streamlit Community Cloud | no card | sleeps after 12h idle, cold-starts on next visit |
+
+**Why one HF Space for both Ollama and FastAPI** (`Dockerfile.space`): a
+single cold start beats two, and FastAPI reaches Ollama over `localhost`
+with zero network config. The fine-tuned GGUF is pulled from
+`sud000/medclaim-llama3.2-3b-gguf` at container start, never baked into the
+image — free Space storage is ephemeral, so this happens on every wake.
+**Honest cold-start cost**: Ollama's model load + the NLI/reranker/embedding
+model downloads (also ephemeral, also re-fetched every wake) make the first
+request after a sleep take **1–2 minutes**. Requests after that are normal
+speed. This tradeoff was explicit and accepted, not a limitation to hide.
+
+**Files added for this**:
+- `Dockerfile.space` + `docker/space_entrypoint.sh` — the HF Space container
+- `requirements-cloud.txt` — slim deps for the Space (no docling/celery/
+  reportlab; ingestion stays a local step against the cloud stores)
+- `requirements-ui.txt` — even slimmer deps for Streamlit Cloud (just
+  `streamlit` + `httpx` — the UI only ever talks to the FastAPI backend)
+- `spaces_readme.md.example` — the YAML frontmatter HF Spaces needs
+- `.github/workflows/keep_alive.yml` — pings Qdrant Cloud + Neo4j Aura twice
+  a week (well inside their 1-week/30-day windows) so "free" doesn't quietly
+  become "deleted"
+- `config.py` / `retrieval/vector_store.py` — `QDRANT_API_KEY` support added
+  (Neo4j's URI+user+password and Redis's full connection-string pattern
+  already covered Aura/Upstash with zero code changes)
+
+### Setup checklist (accounts only you can create)
+
+1. **Qdrant Cloud** (cloud.qdrant.io) → free cluster → copy the cluster URL
+   + API key → `QDRANT_URL`, `QDRANT_API_KEY`
+2. **Neo4j AuraDB Free** (neo4j.com/cloud/aura-free) → new free instance →
+   download the generated credentials → `NEO4J_URI`, `NEO4J_USER`,
+   `NEO4J_PASSWORD`
+3. **Upstash Redis** (upstash.com) → free database → copy the `rediss://`
+   connection string → `REDIS_URL`
+4. **Re-run ingestion once against the new cloud stores** (`--sync`, from
+   your laptop, pointed at the new URLs) — Qdrant Cloud and Aura start empty
+5. **Hugging Face Space**: huggingface.co/new-space → SDK: Docker → point at
+   this repo → paste `spaces_readme.md.example`'s frontmatter into the
+   Space's README.md → add the above three connection secrets plus
+   `LANGFUSE_*` (optional) as Space secrets
+6. **Streamlit Community Cloud** (share.streamlit.io) → new app → this repo,
+   `ui/app.py`, `requirements-ui.txt` → set `MEDCLAIM_API` to the HF Space's
+   public URL
+7. **Keep-alive**: add `QDRANT_URL`, `QDRANT_API_KEY`, `NEO4J_URI`,
+   `NEO4J_USER`, `NEO4J_PASSWORD` as GitHub Actions repo secrets so
+   `.github/workflows/keep_alive.yml` can run
+
 ## Troubleshooting
 
 - **`std::bad_alloc` during parsing, segfaults, or `OSError 1455` ("paging

@@ -1,0 +1,6 @@
+# Streamlit Community Cloud deployment (roadmap step 10). The UI only ever
+# talks to the FastAPI backend over HTTP — it needs neither the agent stack
+# nor any store client directly, so this stays intentionally tiny (faster
+# cold builds/starts on the free tier).
+streamlit>=1.38
+httpx>=0.27

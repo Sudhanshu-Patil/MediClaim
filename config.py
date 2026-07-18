@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -36,8 +37,9 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    # Qdrant
+    # Qdrant (qdrant_api_key: required for Qdrant Cloud, unused/None for local Docker)
     qdrant_url: str = field(default_factory=lambda: _env("QDRANT_URL", "http://localhost:6333"))
+    qdrant_api_key: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_API_KEY") or None)
     qdrant_collection: str = field(default_factory=lambda: _env("QDRANT_COLLECTION", "medclaim_chunks"))
 
     # Neo4j

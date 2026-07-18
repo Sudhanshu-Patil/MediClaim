@@ -1,0 +1,48 @@
+# Hugging Face Space (Docker SDK, free CPU Basic tier — no credit card,
+# roadmap step 10) running Ollama + the FastAPI backend in ONE container.
+#
+# Why combined: a free Space sleeps after inactivity and cold-starts on the
+# next visit (README §10 deployment notes) — one container means one cold
+# start instead of two, and FastAPI reaches Ollama over localhost with zero
+# network config. The fine-tuned GGUF is pulled from the Hub at container
+# start (sud000/medclaim-llama3.2-3b-gguf), never baked into the image.
+#
+# Build context: repo root. HF Spaces auto-builds this on push; app_port is
+# declared in the Space's README.md metadata (see spaces_readme.md.example).
+
+FROM python:3.11-slim
+
+# ── Ollama (serves the fine-tuned model on localhost:11434) ────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://ollama.com/install.sh | sh \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python deps (cloud-slim: no docling/torch — ingestion runs locally, not
+#    on the free Space; the Space only serves query-time retrieval + agent) ─
+WORKDIR /app
+COPY requirements-cloud.txt .
+RUN pip install --no-cache-dir -r requirements-cloud.txt
+
+COPY . .
+
+# HF Spaces containers run as a non-root user; Ollama's model cache and our
+# data dir must be writable by it.
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /home/appuser/.ollama /app/data /app/finetuning/models \
+    && chown -R appuser:appuser /home/appuser /app
+USER appuser
+ENV HOME=/home/appuser \
+    OLLAMA_MODELS=/home/appuser/.ollama/models \
+    LLM_BASE_URL=http://127.0.0.1:11434 \
+    LLM_MODEL=medclaim-llm \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 7860
+
+# Cold start: launch Ollama, wait for it, pull the GGUF from HF Hub + build
+# the Modelfile-defined model (idempotent — `ollama create` is a no-op if the
+# model already exists in this session's ephemeral storage), then serve the
+# API on the port HF Spaces expects (7860).
+COPY docker/space_entrypoint.sh /app/docker/space_entrypoint.sh
+ENTRYPOINT ["/bin/bash", "/app/docker/space_entrypoint.sh"]

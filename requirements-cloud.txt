@@ -1,0 +1,42 @@
+# Cloud deployment (roadmap step 10 — free-tier HF Space serving the agent).
+#
+# Deliberately excludes what the free Space never needs: docling/reportlab
+# (ingestion is a local-only step — you ingest on your laptop against the
+# cloud Qdrant/Neo4j, the Space only serves QUERIES), celery (no worker
+# process on a single free Space container), and streamlit (the UI deploys
+# separately to Streamlit Community Cloud, see requirements-ui.txt).
+#
+# Everything the agent graph touches at query time: retrieval (dense+sparse
+# embedding, rerank), generation (Ollama client), guardrails (NLI grounding
+# needs torch+transformers — the heaviest deps here, and why the first
+# request after a sleep/wake cycle is slow: fresh model downloads onto
+# ephemeral storage), tracing, the API layer itself.
+
+pydantic>=2.7
+python-dotenv>=1.0
+
+qdrant-client>=1.12
+neo4j>=5.24
+redis>=5.0
+
+fastembed>=0.4
+numpy>=1.26
+torch>=2.0,<3
+transformers>=4.46,<6
+
+tiktoken>=0.7
+
+langgraph>=0.6,<0.7
+langchain-core>=0.3,<0.4
+langgraph-checkpoint-sqlite>=2.0,<3
+httpx>=0.27
+langfuse>=2.53,<3
+
+fastapi
+uvicorn[standard]
+slowapi
+sse-starlette
+pymupdf
+edge-tts
+
+mcp>=1.2
