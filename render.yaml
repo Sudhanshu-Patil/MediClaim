@@ -28,6 +28,16 @@ services:
       - key: GROQ_MODEL
         value: llama-3.3-70b-versatile
 
+      # Must match whatever embedding model actually built the Qdrant
+      # collection (config.py defaults to bge-base/768-dim otherwise) —
+      # a mismatch here means every query embeds at the wrong dimension
+      # and Qdrant rejects the search outright. bge-small is also lighter,
+      # which helps the free RAM budget alongside everything else.
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-small-en-v1.5
+      - key: EMBEDDING_DIM
+        value: "384"
+
       # Guardrails: NLI grounding needs torch (~450MB) — doesn't fit the
       # free 512MB tier alongside embedding+reranker+FastAPI. Citation
       # validation and the judge still gate every answer; only the NLI
