@@ -38,6 +38,15 @@ services:
       - key: EMBEDDING_DIM
         value: "384"
 
+      # BAAI/bge-reranker-base costs ~1GB RAM on its own (documented in
+      # .env.example as the thing to disable first on low-memory machines).
+      # That alone blows past Render's 512MB cap once added to the dense +
+      # sparse encoders — measured live: first real query loaded all three
+      # lazily, exceeded the limit, and Render OOM-killed + restarted the
+      # process. Results fall back to RRF-fused order (reranked=false).
+      - key: RERANKER_ENABLED
+        value: "0"
+
       # Guardrails: NLI grounding needs torch (~450MB) — doesn't fit the
       # free 512MB tier alongside embedding+reranker+FastAPI. Citation
       # validation and the judge still gate every answer; only the NLI
