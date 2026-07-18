@@ -1,16 +1,21 @@
-# Cloud deployment (roadmap step 10 — free-tier HF Space serving the agent).
+# Cloud deployment (roadmap step 10 — Render free web service + Groq API).
 #
-# Deliberately excludes what the free Space never needs: docling/reportlab
+# Deliberately excludes what the cloud API never needs: docling/reportlab
 # (ingestion is a local-only step — you ingest on your laptop against the
-# cloud Qdrant/Neo4j, the Space only serves QUERIES), celery (no worker
-# process on a single free Space container), and streamlit (the UI deploys
-# separately to Streamlit Community Cloud, see requirements-ui.txt).
+# cloud Qdrant/Neo4j, the API only serves QUERIES), celery (no worker
+# process on a single free web service), streamlit (the UI deploys
+# separately to Streamlit Community Cloud, see requirements-ui.txt), and —
+# after the deployment pivot below — torch/transformers/Ollama entirely.
 #
-# Everything the agent graph touches at query time: retrieval (dense+sparse
-# embedding, rerank), generation (Ollama client), guardrails (NLI grounding
-# needs torch+transformers — the heaviest deps here, and why the first
-# request after a sleep/wake cycle is slow: fresh model downloads onto
-# ephemeral storage), tracing, the API layer itself.
+# Pivot history: originally planned to self-host Ollama + the fine-tuned
+# GGUF in the cloud. Measured this project's own retrieval+guardrail stack
+# (NLI grounding + dense/sparse embedding + reranker) at 719MB RSS with
+# torch loaded — before adding a multi-GB Ollama process on top. No no-card
+# host offers that much RAM. Fix: generation now calls Groq's free hosted
+# API (LLM_PROVIDER=groq) instead of a local model, and NLI grounding is
+# disabled for this deployment (GROUNDING_ENABLED=0) — dropping torch
+# brings the measured footprint to 198MB, comfortably inside Render's free
+# 512MB tier. Full detail + the tradeoff being made explicit: RUNME §15.
 
 pydantic>=2.7
 python-dotenv>=1.0
@@ -21,8 +26,6 @@ redis>=5.0
 
 fastembed>=0.4
 numpy>=1.26
-torch>=2.0,<3
-transformers>=4.46,<6
 
 tiktoken>=0.7
 

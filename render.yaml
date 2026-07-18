@@ -1,0 +1,59 @@
+# Render Blueprint (render.com/docs/blueprint-spec) — roadmap step 10.
+#
+# Deploy: render.com → New → Blueprint → point at this GitHub repo. Render
+# reads this file and provisions the service; you only need to fill in the
+# secret values it prompts for (sync: false below) in the dashboard.
+#
+# Free tier: 512 MB RAM, 0.1 CPU, spins down after 15 min idle, ~30-60s
+# cold start on the next request. No local LLM process runs here — the
+# agent's grounding check is disabled (GROUNDING_ENABLED=0) specifically to
+# fit this RAM budget; see RUNME §15 for the measured numbers behind that.
+
+services:
+  - type: web
+    name: medclaim-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-cloud.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+      # LLM: Groq's free hosted API, not a local model (README §10 pivot)
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+      # Guardrails: NLI grounding needs torch (~450MB) — doesn't fit the
+      # free 512MB tier alongside embedding+reranker+FastAPI. Citation
+      # validation and the judge still gate every answer; only the NLI
+      # entailment layer is off here. Full local dev keeps it on.
+      - key: GROUNDING_ENABLED
+        value: "0"
+
+      # Cloud data layer (roadmap step 10) — fill in from Qdrant Cloud /
+      # Neo4j Aura / Upstash dashboards
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+      # Optional: self-hosted Langfuse or Langfuse Cloud, for live traces
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        sync: false

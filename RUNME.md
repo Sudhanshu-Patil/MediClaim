@@ -439,49 +439,66 @@ gated agent:
 
 ## 15. Free-tier live deployment (roadmap step 10)
 
-**Revision note**: the original plan combined Ollama+FastAPI into one
-Hugging Face Space (free CPU tier). Verified directly (not assumed) that HF
-now gates Docker/Gradio Spaces behind a paid PRO seat for every account —
-only static (no-backend) Spaces stay free. Separately, a from-scratch survey
-of Render/Railway/Fly.io/Koyeb/back4app found none combine "no card" with
-enough RAM (~4 GB) for Ollama + the fine-tuned model + the NLI/reranker
-stack. Given that, the plan below trades "no card anywhere" for **Oracle
-Cloud's Always Free tier** — a persistent VM, never charged unless you
-manually upgrade, card required only for identity verification at signup.
+**Revision history** (two pivots, both from verifying instead of assuming):
+1. Original plan combined Ollama+FastAPI in one Hugging Face Space (free CPU
+   tier). Verified directly that HF now gates Docker/Gradio Spaces behind a
+   paid PRO seat for every account — only static (no-backend) Spaces stay
+   free.
+2. Second plan moved Ollama+FastAPI to an Oracle Cloud Always Free VM (real
+   RAM, no sleep). Dropped by choice — no interest in a card-gated tier or
+   in running a laptop as a server.
+3. **Current plan**: stop self-hosting the LLM in the cloud at all. Generation
+   calls **Groq's free hosted API** (a genuinely free tier, not a trial — no
+   card) instead of a local Ollama process. This also **solves the RAM
+   problem outright**: measured this project's own retrieval+guardrail stack
+   at **719MB RSS** with the NLI grounding model loaded (torch+transformers
+   alone account for ~440MB of that) — before even adding a multi-GB Ollama
+   process. Dropping local LLM inference *and* NLI grounding for this
+   deployment brings it to **198MB measured**, comfortably inside a free,
+   no-card host's 512MB ceiling. Trading the fine-tuned 3B for a much larger
+   stock model via Groq for the *public* demo isn't obviously a downgrade
+   either — the fine-tuning story lives in the eval results, the Colab
+   notebook, and this file, not in requiring the live demo to literally be
+   the 3B.
 
 | Layer | Service | Free tier | Behavior |
 |---|---|---|---|
 | Vector store | Qdrant Cloud | 1 GB cluster, no card | suspends after 1 week idle, **deleted after 4 weeks** — keep-alive workflow below |
 | Graph store | Neo4j AuraDB Free | no card | paused after inactivity, **deleted after 30 days** — same keep-alive |
 | Redis (L3 cache) | Upstash Redis | no card | always-on (serverless, no sleep) |
-| Agent + API + LLM | Oracle Cloud Always Free (Ampere A1 VM, up to 4 OCPU/24 GB) | card required (never charged) | **persistent — no sleep, no cold start** |
+| LLM | Groq API (`console.groq.com`) | free, no card, persistent (not a trial) | ~30 req/min — fine for a demo, not a load test |
+| Agent + API | Render free web service | no card, 512 MB RAM | sleeps after 15 min idle, ~30–60s cold start |
 | UI | Streamlit Community Cloud | no card | sleeps after 12h idle, cold-starts on next visit |
 
-**Why one container for Ollama + FastAPI** (`Dockerfile.space`, runs on the
-Oracle VM via plain `docker run`): FastAPI reaches Ollama over `localhost`
-with zero network config. The fine-tuned GGUF is pulled from
-`sud000/medclaim-llama3.2-3b-gguf` on first boot only — the entrypoint skips
-the download if `/app/finetuning/models` already has it, so **mount that
-directory (and `/home/appuser/.ollama`) as persistent volumes** and the
-2 GB+ of model weights survive container restarts instead of re-downloading.
+**What changed in the code**: `agent/llm_client.py` now has two
+interchangeable clients — `OllamaClient` (local dev, unchanged) and
+`GroqClient` (OpenAI-compatible schema) — selected by `LLM_PROVIDER`
+(`ollama` default, `groq` for this deployment). Every call site already went
+through `get_llm()`/`get_judge_llm()`, so nothing downstream (generation,
+judge, API health check) needed to change. `GROUNDING_ENABLED=0` disables
+the NLI check for this deployment only — citation validation and the judge
+still gate every answer, so nothing ships unverified; grounding is the one
+guardrail that's off, and it's off for a measured RAM reason, not silently.
 
 **Files for this**:
-- `Dockerfile.space` + `docker/space_entrypoint.sh` — the Ollama+FastAPI
-  container (host-agnostic; originally built for HF Spaces, runs unchanged
-  on Oracle)
-- `requirements-cloud.txt` — slim query-time deps (no docling/celery/
-  reportlab; ingestion stays a local step against the cloud stores)
+- `requirements-cloud.txt` — slim query-time deps: no docling/celery/
+  reportlab (ingestion stays a local step against the cloud stores), and
+  now no torch/transformers either
 - `requirements-ui.txt` — `streamlit` + `httpx` only, for Streamlit Cloud
+- `render.yaml` — Render Blueprint; one import wires the whole service
 - `.github/workflows/keep_alive.yml` — pings Qdrant Cloud + Neo4j Aura twice
   a week (well inside their 1-week/30-day windows) so "free" doesn't quietly
   become "deleted"
-- `config.py` / `retrieval/vector_store.py` — `QDRANT_API_KEY` support
-  (Neo4j's URI+user+password and Redis's full connection-string pattern
-  already covered Aura/Upstash with zero code changes)
+- `config.py` / `retrieval/vector_store.py` — `QDRANT_API_KEY` +
+  `QDRANT_TIMEOUT_S` (Qdrant's client default timeout is tuned for local
+  Docker's sub-millisecond round trips and threw `WriteTimeout` against the
+  real network hop to Qdrant Cloud on a cold collection's first write —
+  measured, not assumed; now 30s)
 
 ### Setup checklist
 
-Steps 1–4 done and verified working (credentials confirmed live):
+Steps 1–4 done and verified working end-to-end (not just pinged — a real
+ingestion + retrieval round-trip against the live cloud stores passed):
 
 1. ✅ **Qdrant Cloud** (cloud.qdrant.io) → `QDRANT_URL`, `QDRANT_API_KEY`
 2. ✅ **Neo4j AuraDB Free** → `NEO4J_URI`, `NEO4J_USER` (the Aura-generated
@@ -490,30 +507,26 @@ Steps 1–4 done and verified working (credentials confirmed live):
 4. **Re-run ingestion once against the new cloud stores** (`--sync`, from
    your laptop, pointed at the new URLs) — Qdrant Cloud and Aura start empty
 
-Remaining — needs an Oracle Cloud account (only you can create this one):
+Remaining — each needs an account only you can create:
 
-5. **Oracle Cloud** (oracle.com/cloud/free) → sign up (card required for
-   verification, never charged on Always Free) → Compute → Create Instance
-   → **Shape: `VM.Standard.A1.Flex`** (this exact shape is the Always Free
-   one — picking a different shape can incur charges) → up to 4 OCPU / 24 GB
-   → Ubuntu image → generate/download the SSH key pair → note the VM's
-   public IP
-6. Open port 7860 (or whichever `PORT` you choose) in the VM's **Security
-   List / Network Security Group** — Oracle's default is deny-most, this is
-   the step people most often miss
-7. Hand over: the VM's public IP + the SSH private key (or just run the
-   commands below yourself over SSH) — from there, standing it up is:
-   `docker build -f Dockerfile.space -t medclaim-space .` →
-   `docker run -d --restart unless-stopped -p 7860:7860 -v medclaim-ollama:/home/appuser/.ollama -v medclaim-data:/app/data --env-file .env.cloud medclaim-space`
-   (`.env.cloud` = `QDRANT_URL`/`QDRANT_API_KEY`/`NEO4J_*`/`REDIS_URL` from
-   steps 1–3, plus `LANGFUSE_*` if you want cloud traces)
-8. **Streamlit Community Cloud** (share.streamlit.io) → new app → this repo,
-   `ui/app.py`, `requirements-ui.txt` → set `MEDCLAIM_API` to
-   `http://<oracle-vm-ip>:7860`
-9. **Keep-alive**: add `QDRANT_URL`, `QDRANT_API_KEY`, `NEO4J_URI`,
+5. **Groq** (console.groq.com) → sign up, no card → API Keys → create one →
+   `GROQ_API_KEY`
+6. **Render** (render.com) → New → Blueprint → connect this GitHub repo →
+   Render reads `render.yaml` and prompts for the `sync: false` secrets
+   (the three cloud store connections from steps 1–3, plus `GROQ_API_KEY`)
+   → deploys automatically on push thereafter
+7. **Streamlit Community Cloud** (share.streamlit.io) → new app → this repo,
+   `ui/app.py`, `requirements-ui.txt` → set `MEDCLAIM_API` to the Render
+   service's public URL
+8. **Keep-alive**: add `QDRANT_URL`, `QDRANT_API_KEY`, `NEO4J_URI`,
    `NEO4J_USER`, `NEO4J_PASSWORD` as GitHub Actions repo secrets so
-   `.github/workflows/keep_alive.yml` can run (Oracle's VM itself needs no
-   keep-alive — it doesn't sleep)
+   `.github/workflows/keep_alive.yml` can run
+
+### Security note
+
+Qdrant/Neo4j/Upstash credentials were shared in plaintext during setup.
+**Rotate all three** once the deployment is finalized — a two-minute job on
+each service's dashboard, and it closes the exposure for good.
 
 ## Troubleshooting
 

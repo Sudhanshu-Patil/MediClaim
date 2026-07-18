@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional
+from typing import Optional, Union
 
-from agent.llm_client import OllamaClient
+from agent.llm_client import GroqClient, OllamaClient, make_llm_client
 from agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -30,13 +30,13 @@ SYSTEM_PROMPT = (
     "medical and insurance knowledge in plain text."
 )
 
-_llm: Optional[OllamaClient] = None
+_llm: Optional[Union[OllamaClient, GroqClient]] = None
 
 
-def get_llm() -> OllamaClient:
+def get_llm() -> Union[OllamaClient, GroqClient]:
     global _llm
     if _llm is None:
-        _llm = OllamaClient()
+        _llm = make_llm_client()
     return _llm
 
 

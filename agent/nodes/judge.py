@@ -11,30 +11,32 @@ import json
 import logging
 import os
 import re
-from typing import Optional
+from typing import Optional, Union
 
-from agent.llm_client import OllamaClient
+from agent.llm_client import GroqClient, OllamaClient, make_llm_client
 from agent.nodes.generate import get_llm
 from agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-_judge_llm: Optional[OllamaClient] = None
+_judge_llm: Optional[Union[OllamaClient, GroqClient]] = None
 
 
-def get_judge_llm() -> OllamaClient:
-    """Judge model, separately configurable (LLM_JUDGE_MODEL).
+def get_judge_llm() -> Union[OllamaClient, GroqClient]:
+    """Judge model, separately configurable (LLM_JUDGE_MODEL) but same
+    provider as the generator (LLM_PROVIDER) — e.g. a faster/smaller Groq
+    model for judging than for generation, not a different service.
 
     Defaults to the generator model. Known limitation (seen in Langfuse
     traces): a 3B judge scores erratically — e.g. zero-scoring a verbatim
     quote for "lacking additional context". Point LLM_JUDGE_MODEL at a
-    stronger local model when available; the dedicated NLI grounding check
+    stronger model when available; the dedicated NLI grounding check
     (roadmap step 5) is the principled fix for faithfulness.
     """
     global _judge_llm
     if _judge_llm is None:
         judge_model = os.getenv("LLM_JUDGE_MODEL")
-        _judge_llm = OllamaClient(model=judge_model) if judge_model else get_llm()
+        _judge_llm = make_llm_client(model=judge_model) if judge_model else get_llm()
     return _judge_llm
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
