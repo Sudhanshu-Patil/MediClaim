@@ -278,10 +278,11 @@ with st.sidebar:
         else:
             st.error(result.text[:300])
 
-# ── main: document library ──────────────────────────────────────────────────
-with st.expander("📚 Document Library — browse what's indexed"):
+    # ── document library ────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📚 Document Library")
     lib_source_type = st.selectbox(
-        "Filter by source type",
+        "Filter library by source type",
         [None, "policy", "clinical_guideline", "claim_note"],
         format_func=lambda v: v or "all documents",
         key="lib_source_type",
@@ -303,24 +304,37 @@ with st.expander("📚 Document Library — browse what's indexed"):
         title = (f"{icon} {doc.get('doc_name') or doc['doc_id']} · "
                  f"v{doc.get('doc_version')} · {doc.get('num_chunks')} chunks")
         with st.expander(title):
-            st.caption(f"source_type: `{doc.get('source_type')}`"
-                      + (f" · effective: {doc['effective_date']}"
+            st.caption(f"`{doc.get('source_type')}`"
+                      + (f" · effective {doc['effective_date']}"
                          if doc.get("effective_date") else "")
                       + (f" · {doc['num_tables']} table(s)"
                          if doc.get("num_tables") else ""))
             if doc.get("sections"):
                 st.caption("Sections: " + ", ".join(doc["sections"]))
 
-            preview_key = f"show_preview_{doc['doc_id']}"
-            if st.button("👁️ Preview page 1", key=f"btn_{doc['doc_id']}"):
-                ss[preview_key] = not ss.get(preview_key, False)
-            if ss.get(preview_key):
-                try:
-                    st.image(f"{API}/documents/{doc['doc_id']}/preview",
-                             caption=doc.get("doc_name"))
-                except Exception:
-                    st.caption("Preview unavailable — non-PDF source, or the "
-                              "original file isn't retained on the server.")
+            # file_available/is_pdf come from the API's own filesystem check —
+            # decided BEFORE rendering, instead of blindly pointing an <img>/
+            # <iframe> at a URL that might 404/415 client-side (that silent
+            # failure produced a broken-image icon for a PPTX previously).
+            view_key = f"viewing_doc_{doc['doc_id']}"
+            label = "🙈 Hide file" if ss.get(view_key) else "👁️ View entire file"
+            if st.button(label, key=f"eye_{doc['doc_id']}", use_container_width=True):
+                ss[view_key] = not ss.get(view_key, False)
+
+            if ss.get(view_key):
+                file_url = f"{API}/documents/{doc['doc_id']}/file"
+                if not doc.get("file_available"):
+                    st.warning("Original file not retained on the server — "
+                              "nothing to view or download.")
+                elif doc.get("is_pdf"):
+                    # Browser's native PDF viewer: every page, scrollable and
+                    # zoomable — not just a page-1 thumbnail.
+                    components.iframe(file_url, height=500, scrolling=True)
+                else:
+                    suffix = Path(doc.get("doc_name") or "").suffix or "this type"
+                    st.info(f"No in-browser preview for {suffix} files.")
+                    st.link_button("⬇️ Download to view", file_url,
+                                  use_container_width=True)
 
 # ── main: chat ──────────────────────────────────────────────────────────────
 st.header("Ask the policy corpus")

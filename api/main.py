@@ -34,7 +34,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -213,7 +213,7 @@ def upload(request: Request, file: UploadFile = File(...),
 
 
 # ── Source highlighting (README §8 point 4) ────────────────────────────────
-def _find_source_pdf(doc_name: str) -> Optional[Path]:
+def _find_source_file(doc_name: str) -> Optional[Path]:
     for directory in (UPLOAD_DIR, SAMPLE_DIR):
         candidate = directory / doc_name
         if candidate.exists():
@@ -221,42 +221,56 @@ def _find_source_pdf(doc_name: str) -> Optional[Path]:
     return None
 
 
+_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
 @app.get("/documents")
 @limiter.limit("30/minute")
 def list_documents(request: Request, source_type: Optional[str] = None):
     """Document library listing (grouped chunks), optionally filtered by
-    source_type — powers the UI's document browser."""
+    source_type — powers the UI's document browser.
+
+    Each entry is annotated with file_available/is_pdf so the UI can decide
+    up front whether to embed a viewer or offer a download, instead of
+    blindly pointing an <img>/<iframe> at a URL that may 404 or 415 (that
+    silent-failure pattern is what produced a broken-image icon for a PPTX
+    in earlier testing).
+    """
     from retrieval.vector_store import QdrantStore
 
-    return QdrantStore().list_documents(source_type=source_type)
+    docs = QdrantStore().list_documents(source_type=source_type)
+    for doc in docs:
+        path = _find_source_file(doc.get("doc_name") or "")
+        doc["file_available"] = path is not None
+        doc["is_pdf"] = bool(path and path.suffix.lower() == ".pdf")
+    return docs
 
 
-@app.get("/documents/{doc_id}/preview")
-@limiter.limit("30/minute")
-def document_preview(request: Request, doc_id: str, page: int = 1, zoom: float = 1.5):
-    """Render a page of the source PDF (no highlighting) as a thumbnail."""
-    import fitz  # PyMuPDF
-
+@app.get("/documents/{doc_id}/file")
+@limiter.limit("20/minute")
+def document_file(request: Request, doc_id: str):
+    """Serve the ENTIRE source file — inline for PDFs (browser's native
+    viewer renders every page, scrollable/zoomable), attachment download for
+    DOCX/PPTX (no in-browser renderer for those without extra JS libraries)."""
     from retrieval.vector_store import QdrantStore
 
     doc_name = QdrantStore().get_document_name(doc_id)
     if not doc_name:
         raise HTTPException(404, "document not found")
-    pdf_path = _find_source_pdf(doc_name)
-    if not pdf_path:
+    path = _find_source_file(doc_name)
+    if not path:
         raise HTTPException(404, f"source file {doc_name} not found on server")
-    if pdf_path.suffix.lower() != ".pdf":
-        raise HTTPException(415, "preview is only available for PDF sources")
 
-    pdf = fitz.open(pdf_path)
-    try:
-        if page < 1 or page > len(pdf):
-            raise HTTPException(404, f"page {page} out of range ({len(pdf)} pages)")
-        pixmap = pdf[page - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        return Response(content=pixmap.tobytes("png"), media_type="image/png",
-                        headers={"X-Total-Pages": str(len(pdf))})
-    finally:
-        pdf.close()
+    media_type = _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    disposition = "inline" if path.suffix.lower() == ".pdf" else "attachment"
+    return FileResponse(
+        path, media_type=media_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{path.name}"'},
+    )
 
 
 @app.get("/chunks/{chunk_id}")
@@ -291,7 +305,7 @@ def source_image(request: Request, chunk_id: str, zoom: float = 2.0,
     doc_name, bboxes = payload.get("doc_name"), payload.get("bbox") or []
     if not doc_name or not bboxes:
         raise HTTPException(404, "chunk has no bbox provenance")
-    pdf_path = _find_source_pdf(doc_name)
+    pdf_path = _find_source_file(doc_name)
     if not pdf_path:
         raise HTTPException(404, f"source file {doc_name} not found on server")
 
