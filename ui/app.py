@@ -341,15 +341,29 @@ def _document_preview_dialog(doc: dict) -> None:
                   "nothing to preview or download.")
         return
     if doc.get("is_pdf"):
-        components.iframe(file_url, height=650, scrolling=True)
-        link_l, link_r = st.columns(2)
-        link_l.link_button("🔗 Open in new tab", file_url, use_container_width=True)
-        link_r.link_button("⬇️ Download", file_url + "?download=true",
-                           use_container_width=True)
+        # No embedded iframe: Streamlit wraps every custom component
+        # (including components.iframe) in its OWN sandboxed iframe, and
+        # Chrome's PDF renderer refuses to activate inside that nested
+        # sandbox — confirmed by two independent attempts, neither
+        # server-side header we control affects it. Opening in a real
+        # browser tab sidesteps the sandbox entirely and is arguably the
+        # better outcome anyway: full native viewer, search, zoom, and its
+        # own built-in download control.
+        st.link_button("🔗 Open full PDF in new tab", file_url,
+                       use_container_width=True, type="primary")
+        st.caption("Opens in your browser's own PDF viewer (all pages, "
+                  "searchable, zoomable) — a nested in-app preview isn't "
+                  "possible here due to how Streamlit sandboxes embedded "
+                  "content.")
+        st.link_button("⬇️ Download", file_url + "?download=true",
+                       use_container_width=True)
     else:
         suffix = Path(doc.get("doc_name") or "").suffix or "this type"
-        st.info(f"No in-browser preview for {suffix} files.")
-        st.link_button("⬇️ Download to view", file_url, use_container_width=True)
+        st.info(f"No in-browser preview for {suffix} files "
+               "(no in-browser Office-document renderer without extra "
+               "dependencies) — download it instead.")
+        st.link_button("⬇️ Download to view", file_url,
+                       use_container_width=True, type="primary")
 
 
 if ss.library_preview_doc:
