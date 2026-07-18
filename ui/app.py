@@ -227,11 +227,16 @@ def run_turn(prompt: str, source_type) -> None:
 with st.sidebar:
     st.title("🏥 MedClaim")
     try:
-        health = httpx.get(f"{API}/health", timeout=10).json()
+        health = httpx.get(f"{API}/health", timeout=20).json()
         st.success(f"API up · {health.get('qdrant_points', '?')} chunks · "
                    f"LLM {'✓' if health.get('llm_available') else '✗'}")
     except Exception:
-        st.error(f"API unreachable at {API}\n`uvicorn api.main:app --port 8000`")
+        if "localhost" in API or "127.0.0.1" in API:
+            st.error(f"API unreachable at {API}\n`uvicorn api.main:app --port 8000`")
+        else:
+            st.error(f"API unreachable at {API}\nFree-tier services sleep "
+                     f"after ~15 min idle and can take 30-60s to wake up — "
+                     f"try again in a moment.")
 
     # ── history management ─────────────────────────────────────────────────
     st.subheader("💬 Chats")
@@ -292,7 +297,9 @@ with st.sidebar:
     )
     try:
         params = {"source_type": lib_source_type} if lib_source_type else {}
-        lib_docs = httpx.get(f"{API}/documents", params=params, timeout=30).json()
+        _resp = httpx.get(f"{API}/documents", params=params, timeout=30)
+        _resp.raise_for_status()  # surface the real HTTP error instead of
+        lib_docs = _resp.json()  # a confusing JSON-decode error on the body
     except Exception as exc:
         lib_docs = []
         st.error(f"couldn't load document list: {exc}")

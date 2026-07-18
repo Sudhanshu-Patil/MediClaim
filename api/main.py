@@ -65,13 +65,23 @@ def get_graph():
 
 @app.on_event("startup")
 def warm() -> None:
-    """Load every model once so first-request latency is generation-only."""
+    """Load every model once so first-request latency is generation-only.
+
+    NLI is only warmed when GROUNDING_ENABLED=1 — on deployments where it's
+    off (e.g. Render, torch isn't even installed there), attempting the load
+    anyway is a guaranteed failed import on every cold start: wasted time
+    plus a scary ERROR-level traceback in the logs for something that isn't
+    actually a problem.
+    """
     try:
-        from agent.nodes.grounding import _get_nli
         from agent.nodes.retrieve import get_retriever
+        from config import get_settings
 
         get_retriever()
-        _get_nli()
+        if get_settings().grounding_enabled:
+            from agent.nodes.grounding import _get_nli
+
+            _get_nli()
         get_graph()
         logger.info("Warm start complete: retriever, NLI, graph loaded")
     except Exception:
@@ -202,7 +212,22 @@ def upload(request: Request, file: UploadFile = File(...),
 
     # Synchronous ingestion keeps the demo self-contained; swap to
     # ingest_document.delay(...) when a Celery worker is running.
-    from ingestion.tasks import run_ingestion
+    try:
+        from ingestion.tasks import run_ingestion
+    except ImportError:
+        # ingestion.tasks unconditionally imports celery for its separate
+        # @celery_app.task-wrapped async path, even though run_ingestion
+        # itself never needs it. requirements-cloud.txt deliberately omits
+        # celery + docling (ingestion is a local-only step by design — you
+        # ingest on your laptop against the cloud Qdrant/Neo4j; the deployed
+        # API only serves queries). Fail with a clear message instead of a
+        # raw 500 traceback.
+        raise HTTPException(
+            501,
+            "Document upload/ingestion isn't available on this deployment. "
+            "Ingest locally against the cloud Qdrant/Neo4j instead "
+            "(scripts/ingest.py) — see RUNME.md.",
+        )
 
     try:
         result = run_ingestion(str(dest), source_type)

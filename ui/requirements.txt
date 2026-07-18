@@ -1,0 +1,14 @@
+# Streamlit Community Cloud deployment (roadmap step 10). The UI only ever
+# talks to the FastAPI backend over HTTP — it needs neither the agent stack
+# nor any store client directly, so this stays intentionally tiny (faster
+# cold builds/starts on the free tier).
+#
+# Duplicated from requirements-ui.txt at the repo root: Streamlit Community
+# Cloud resolves dependencies from a requirements.txt in the SAME DIRECTORY
+# as the main file (ui/app.py) first, falling back to the repo root only if
+# that's absent. Without this file, it would fall back to the root
+# requirements.txt — the full local ingestion stack (Docling, Celery, etc.),
+# which is unnecessary here and heavy enough to risk the free tier's build
+# limits. Keep both files in sync if UI dependencies change.
+streamlit>=1.38
+httpx>=0.27
