@@ -1,30 +1,38 @@
 #!/bin/bash
-# Cold-start sequence for the HF Space (Dockerfile.space).
-#
-# Runs fresh every time the Space wakes from sleep — free Spaces have
-# ephemeral storage, so both the Ollama model and any HF-cached embedding/
-# NLI/reranker weights are gone after a sleep cycle and re-download here.
-# Expect the FIRST request after a wake to take 1-2 minutes; this is the
-# accepted tradeoff for $0 hosting (README §10).
+# Startup sequence for Dockerfile.space, on a persistent host (Oracle Cloud
+# Always Free VM — README §15). Unlike an ephemeral HF Space, storage here
+# survives container restarts IF /app/data and /home/appuser/.ollama are
+# bind-mounted or named volumes (recommended `docker run -v` flags in
+# RUNME) — so the GGUF and HF model cache download once, ever, not on
+# every restart. Guards below make that safe either way: idempotent whether
+# storage persisted or not.
 set -euo pipefail
 
 echo "[space] starting Ollama…"
 ollama serve &
-OLLAMA_PID=$!
 
 for i in $(seq 1 30); do
     curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
     sleep 1
 done
 
-echo "[space] pulling fine-tuned GGUF from Hugging Face Hub…"
+MODEL_FILE="${HF_MODEL_FILE:-medclaim-llama3.2-3b-q4_K_M.gguf}"
 mkdir -p /app/finetuning/models
-huggingface-cli download "${HF_MODEL_REPO:-sud000/medclaim-llama3.2-3b-gguf}" \
-    "${HF_MODEL_FILE:-medclaim-llama3.2-3b-q4_K_M.gguf}" \
-    --local-dir /app/finetuning/models
+if [ -f "/app/finetuning/models/${MODEL_FILE}" ]; then
+    echo "[space] GGUF already present locally, skipping download"
+else
+    echo "[space] pulling fine-tuned GGUF from Hugging Face Hub (first boot only)…"
+    huggingface-cli download "${HF_MODEL_REPO:-sud000/medclaim-llama3.2-3b-gguf}" \
+        "$MODEL_FILE" --local-dir /app/finetuning/models
+fi
 
-echo "[space] registering the model with Ollama…"
-ollama create medclaim-llm -f /app/finetuning/Modelfile.cpu
+if ollama list 2>/dev/null | grep -q '^medclaim-llm'; then
+    echo "[space] medclaim-llm already registered with Ollama"
+else
+    echo "[space] registering the model with Ollama…"
+    ollama create medclaim-llm -f /app/finetuning/Modelfile.cpu
+fi
 
-echo "[space] starting the API on port 7860…"
-exec uvicorn api.main:app --host 0.0.0.0 --port 7860
+PORT="${PORT:-7860}"
+echo "[space] starting the API on port ${PORT}…"
+exec uvicorn api.main:app --host 0.0.0.0 --port "$PORT"

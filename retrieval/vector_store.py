@@ -46,6 +46,7 @@ class QdrantStore:
         self.client = QdrantClient(
             url=url or settings.qdrant_url,
             api_key=api_key or settings.qdrant_api_key,
+            timeout=settings.qdrant_timeout_s,
         )
 
     # ── Schema ──────────────────────────────────────────────────────────────

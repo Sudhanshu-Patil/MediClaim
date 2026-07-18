@@ -439,62 +439,81 @@ gated agent:
 
 ## 15. Free-tier live deployment (roadmap step 10)
 
-Zero-cost, no-credit-card-anywhere architecture, deliberately embracing
-sleep/cold-start instead of paying for always-on:
+**Revision note**: the original plan combined Ollama+FastAPI into one
+Hugging Face Space (free CPU tier). Verified directly (not assumed) that HF
+now gates Docker/Gradio Spaces behind a paid PRO seat for every account —
+only static (no-backend) Spaces stay free. Separately, a from-scratch survey
+of Render/Railway/Fly.io/Koyeb/back4app found none combine "no card" with
+enough RAM (~4 GB) for Ollama + the fine-tuned model + the NLI/reranker
+stack. Given that, the plan below trades "no card anywhere" for **Oracle
+Cloud's Always Free tier** — a persistent VM, never charged unless you
+manually upgrade, card required only for identity verification at signup.
 
-| Layer | Service | Free tier | Idle behavior |
+| Layer | Service | Free tier | Behavior |
 |---|---|---|---|
-| Vector store | Qdrant Cloud | 1 GB cluster, no card | suspends after 1 week idle, **deleted after 4 weeks** |
-| Graph store | Neo4j AuraDB Free | no card | paused after inactivity, **deleted after 30 days** |
+| Vector store | Qdrant Cloud | 1 GB cluster, no card | suspends after 1 week idle, **deleted after 4 weeks** — keep-alive workflow below |
+| Graph store | Neo4j AuraDB Free | no card | paused after inactivity, **deleted after 30 days** — same keep-alive |
 | Redis (L3 cache) | Upstash Redis | no card | always-on (serverless, no sleep) |
-| Agent + API + LLM | Hugging Face Space (Docker, CPU Basic) | no card | sleeps after inactivity, cold-starts on next request |
+| Agent + API + LLM | Oracle Cloud Always Free (Ampere A1 VM, up to 4 OCPU/24 GB) | card required (never charged) | **persistent — no sleep, no cold start** |
 | UI | Streamlit Community Cloud | no card | sleeps after 12h idle, cold-starts on next visit |
 
-**Why one HF Space for both Ollama and FastAPI** (`Dockerfile.space`): a
-single cold start beats two, and FastAPI reaches Ollama over `localhost`
+**Why one container for Ollama + FastAPI** (`Dockerfile.space`, runs on the
+Oracle VM via plain `docker run`): FastAPI reaches Ollama over `localhost`
 with zero network config. The fine-tuned GGUF is pulled from
-`sud000/medclaim-llama3.2-3b-gguf` at container start, never baked into the
-image — free Space storage is ephemeral, so this happens on every wake.
-**Honest cold-start cost**: Ollama's model load + the NLI/reranker/embedding
-model downloads (also ephemeral, also re-fetched every wake) make the first
-request after a sleep take **1–2 minutes**. Requests after that are normal
-speed. This tradeoff was explicit and accepted, not a limitation to hide.
+`sud000/medclaim-llama3.2-3b-gguf` on first boot only — the entrypoint skips
+the download if `/app/finetuning/models` already has it, so **mount that
+directory (and `/home/appuser/.ollama`) as persistent volumes** and the
+2 GB+ of model weights survive container restarts instead of re-downloading.
 
-**Files added for this**:
-- `Dockerfile.space` + `docker/space_entrypoint.sh` — the HF Space container
-- `requirements-cloud.txt` — slim deps for the Space (no docling/celery/
+**Files for this**:
+- `Dockerfile.space` + `docker/space_entrypoint.sh` — the Ollama+FastAPI
+  container (host-agnostic; originally built for HF Spaces, runs unchanged
+  on Oracle)
+- `requirements-cloud.txt` — slim query-time deps (no docling/celery/
   reportlab; ingestion stays a local step against the cloud stores)
-- `requirements-ui.txt` — even slimmer deps for Streamlit Cloud (just
-  `streamlit` + `httpx` — the UI only ever talks to the FastAPI backend)
-- `spaces_readme.md.example` — the YAML frontmatter HF Spaces needs
+- `requirements-ui.txt` — `streamlit` + `httpx` only, for Streamlit Cloud
 - `.github/workflows/keep_alive.yml` — pings Qdrant Cloud + Neo4j Aura twice
   a week (well inside their 1-week/30-day windows) so "free" doesn't quietly
   become "deleted"
-- `config.py` / `retrieval/vector_store.py` — `QDRANT_API_KEY` support added
+- `config.py` / `retrieval/vector_store.py` — `QDRANT_API_KEY` support
   (Neo4j's URI+user+password and Redis's full connection-string pattern
   already covered Aura/Upstash with zero code changes)
 
-### Setup checklist (accounts only you can create)
+### Setup checklist
 
-1. **Qdrant Cloud** (cloud.qdrant.io) → free cluster → copy the cluster URL
-   + API key → `QDRANT_URL`, `QDRANT_API_KEY`
-2. **Neo4j AuraDB Free** (neo4j.com/cloud/aura-free) → new free instance →
-   download the generated credentials → `NEO4J_URI`, `NEO4J_USER`,
-   `NEO4J_PASSWORD`
-3. **Upstash Redis** (upstash.com) → free database → copy the `rediss://`
-   connection string → `REDIS_URL`
+Steps 1–4 done and verified working (credentials confirmed live):
+
+1. ✅ **Qdrant Cloud** (cloud.qdrant.io) → `QDRANT_URL`, `QDRANT_API_KEY`
+2. ✅ **Neo4j AuraDB Free** → `NEO4J_URI`, `NEO4J_USER` (the Aura-generated
+   username, not necessarily the literal string `neo4j`), `NEO4J_PASSWORD`
+3. ✅ **Upstash Redis** → `REDIS_URL` (the full `rediss://` string)
 4. **Re-run ingestion once against the new cloud stores** (`--sync`, from
    your laptop, pointed at the new URLs) — Qdrant Cloud and Aura start empty
-5. **Hugging Face Space**: huggingface.co/new-space → SDK: Docker → point at
-   this repo → paste `spaces_readme.md.example`'s frontmatter into the
-   Space's README.md → add the above three connection secrets plus
-   `LANGFUSE_*` (optional) as Space secrets
-6. **Streamlit Community Cloud** (share.streamlit.io) → new app → this repo,
-   `ui/app.py`, `requirements-ui.txt` → set `MEDCLAIM_API` to the HF Space's
-   public URL
-7. **Keep-alive**: add `QDRANT_URL`, `QDRANT_API_KEY`, `NEO4J_URI`,
+
+Remaining — needs an Oracle Cloud account (only you can create this one):
+
+5. **Oracle Cloud** (oracle.com/cloud/free) → sign up (card required for
+   verification, never charged on Always Free) → Compute → Create Instance
+   → **Shape: `VM.Standard.A1.Flex`** (this exact shape is the Always Free
+   one — picking a different shape can incur charges) → up to 4 OCPU / 24 GB
+   → Ubuntu image → generate/download the SSH key pair → note the VM's
+   public IP
+6. Open port 7860 (or whichever `PORT` you choose) in the VM's **Security
+   List / Network Security Group** — Oracle's default is deny-most, this is
+   the step people most often miss
+7. Hand over: the VM's public IP + the SSH private key (or just run the
+   commands below yourself over SSH) — from there, standing it up is:
+   `docker build -f Dockerfile.space -t medclaim-space .` →
+   `docker run -d --restart unless-stopped -p 7860:7860 -v medclaim-ollama:/home/appuser/.ollama -v medclaim-data:/app/data --env-file .env.cloud medclaim-space`
+   (`.env.cloud` = `QDRANT_URL`/`QDRANT_API_KEY`/`NEO4J_*`/`REDIS_URL` from
+   steps 1–3, plus `LANGFUSE_*` if you want cloud traces)
+8. **Streamlit Community Cloud** (share.streamlit.io) → new app → this repo,
+   `ui/app.py`, `requirements-ui.txt` → set `MEDCLAIM_API` to
+   `http://<oracle-vm-ip>:7860`
+9. **Keep-alive**: add `QDRANT_URL`, `QDRANT_API_KEY`, `NEO4J_URI`,
    `NEO4J_USER`, `NEO4J_PASSWORD` as GitHub Actions repo secrets so
-   `.github/workflows/keep_alive.yml` can run
+   `.github/workflows/keep_alive.yml` can run (Oracle's VM itself needs no
+   keep-alive — it doesn't sleep)
 
 ## Troubleshooting
 

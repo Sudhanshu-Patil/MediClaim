@@ -1,14 +1,20 @@
-# Hugging Face Space (Docker SDK, free CPU Basic tier — no credit card,
-# roadmap step 10) running Ollama + the FastAPI backend in ONE container.
+# Generic Docker image running Ollama + the FastAPI backend in ONE
+# container (roadmap step 10). Runs on Oracle Cloud's Always Free tier (a
+# persistent Ampere A1 VM — see RUNME §15); no cold-start dance needed
+# there since the VM never sleeps.
 #
-# Why combined: a free Space sleeps after inactivity and cold-starts on the
-# next visit (README §10 deployment notes) — one container means one cold
-# start instead of two, and FastAPI reaches Ollama over localhost with zero
-# network config. The fine-tuned GGUF is pulled from the Hub at container
-# start (sud000/medclaim-llama3.2-3b-gguf), never baked into the image.
+# (Originally targeted Hugging Face Spaces' free CPU tier, but HF now gates
+# Docker/Gradio Spaces behind a paid PRO seat for every account — confirmed
+# directly, not assumed. The image itself didn't need to change: it's a
+# generic container, just pointed at a host that will actually run it free.)
 #
-# Build context: repo root. HF Spaces auto-builds this on push; app_port is
-# declared in the Space's README.md metadata (see spaces_readme.md.example).
+# Why combined into one container: FastAPI reaches Ollama over localhost
+# with zero network config, and (on a host that DOES sleep/cold-start) one
+# container means one cold start instead of two. The fine-tuned GGUF is
+# pulled from the Hub at container start (sud000/medclaim-llama3.2-3b-gguf),
+# never baked into the image.
+#
+# Build context: repo root.
 
 FROM python:3.11-slim
 

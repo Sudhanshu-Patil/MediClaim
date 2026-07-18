@@ -40,6 +40,12 @@ class Settings:
     # Qdrant (qdrant_api_key: required for Qdrant Cloud, unused/None for local Docker)
     qdrant_url: str = field(default_factory=lambda: _env("QDRANT_URL", "http://localhost:6333"))
     qdrant_api_key: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_API_KEY") or None)
+    # QdrantClient's own default is untimed/very short — fine for local
+    # Docker's sub-millisecond round trips, but a real network hop to a
+    # free-tier cloud cluster (esp. a cold collection's first write) can
+    # legitimately take longer. Measured: local Docker never needed this;
+    # Qdrant Cloud threw WriteTimeout on the default.
+    qdrant_timeout_s: int = field(default_factory=lambda: _env_int("QDRANT_TIMEOUT_S", 30))
     qdrant_collection: str = field(default_factory=lambda: _env("QDRANT_COLLECTION", "medclaim_chunks"))
 
     # Neo4j
