@@ -226,6 +226,78 @@ class QdrantStore:
         )
         return {str(p.id): p.payload for p in points}
 
+    # ── Document library (UI browsing) ──────────────────────────────────────
+    def list_documents(
+        self, source_type: Optional[str] = None, status: str = "active"
+    ) -> list[dict]:
+        """Group chunks by doc_id into a library-style listing for the UI.
+
+        Returns one entry per document: doc_id, doc_name, doc_version,
+        source_type, effective_date, ingestion_timestamp, num_chunks,
+        num_tables, sections (sample of section titles).
+        """
+        must: list[qm.Condition] = [
+            qm.FieldCondition(key="status", match=qm.MatchValue(value=status))
+        ]
+        if source_type:
+            must.append(
+                qm.FieldCondition(key="source_type", match=qm.MatchValue(value=source_type))
+            )
+        scroll_filter = qm.Filter(must=must)
+
+        docs: dict[str, dict] = {}
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=scroll_filter,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+            )
+            for point in points:
+                payload = point.payload or {}
+                doc_id = payload.get("doc_id")
+                if not doc_id:
+                    continue
+                entry = docs.setdefault(doc_id, {
+                    "doc_id": doc_id,
+                    "doc_name": payload.get("doc_name"),
+                    "doc_version": payload.get("doc_version"),
+                    "source_type": payload.get("source_type"),
+                    "effective_date": payload.get("effective_date"),
+                    "ingestion_timestamp": payload.get("ingestion_timestamp"),
+                    "num_chunks": 0,
+                    "num_tables": 0,
+                    "sections": set(),
+                })
+                entry["num_chunks"] += 1
+                if payload.get("chunk_type") == "table":
+                    entry["num_tables"] += 1
+                if payload.get("section_title"):
+                    entry["sections"].add(payload["section_title"])
+            if offset is None:
+                break
+
+        results = []
+        for entry in docs.values():
+            entry["sections"] = sorted(entry["sections"])[:8]
+            results.append(entry)
+        results.sort(key=lambda d: (d.get("doc_name") or "").lower())
+        return results
+
+    def get_document_name(self, doc_id: str) -> Optional[str]:
+        """One payload's doc_name for a doc_id — used to locate the source file."""
+        points, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=qm.Filter(
+                must=[qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id))]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        return points[0].payload.get("doc_name") if points else None
+
     # ── Verification helpers ────────────────────────────────────────────────
     def count(self, doc_id: Optional[str] = None, status: Optional[str] = None) -> int:
         must = []

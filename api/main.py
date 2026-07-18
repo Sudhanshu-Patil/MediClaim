@@ -221,6 +221,44 @@ def _find_source_pdf(doc_name: str) -> Optional[Path]:
     return None
 
 
+@app.get("/documents")
+@limiter.limit("30/minute")
+def list_documents(request: Request, source_type: Optional[str] = None):
+    """Document library listing (grouped chunks), optionally filtered by
+    source_type — powers the UI's document browser."""
+    from retrieval.vector_store import QdrantStore
+
+    return QdrantStore().list_documents(source_type=source_type)
+
+
+@app.get("/documents/{doc_id}/preview")
+@limiter.limit("30/minute")
+def document_preview(request: Request, doc_id: str, page: int = 1, zoom: float = 1.5):
+    """Render a page of the source PDF (no highlighting) as a thumbnail."""
+    import fitz  # PyMuPDF
+
+    from retrieval.vector_store import QdrantStore
+
+    doc_name = QdrantStore().get_document_name(doc_id)
+    if not doc_name:
+        raise HTTPException(404, "document not found")
+    pdf_path = _find_source_pdf(doc_name)
+    if not pdf_path:
+        raise HTTPException(404, f"source file {doc_name} not found on server")
+    if pdf_path.suffix.lower() != ".pdf":
+        raise HTTPException(415, "preview is only available for PDF sources")
+
+    pdf = fitz.open(pdf_path)
+    try:
+        if page < 1 or page > len(pdf):
+            raise HTTPException(404, f"page {page} out of range ({len(pdf)} pages)")
+        pixmap = pdf[page - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        return Response(content=pixmap.tobytes("png"), media_type="image/png",
+                        headers={"X-Total-Pages": str(len(pdf))})
+    finally:
+        pdf.close()
+
+
 @app.get("/chunks/{chunk_id}")
 @limiter.limit("60/minute")
 def get_chunk(request: Request, chunk_id: str):

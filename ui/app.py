@@ -278,6 +278,50 @@ with st.sidebar:
         else:
             st.error(result.text[:300])
 
+# ── main: document library ──────────────────────────────────────────────────
+with st.expander("📚 Document Library — browse what's indexed"):
+    lib_source_type = st.selectbox(
+        "Filter by source type",
+        [None, "policy", "clinical_guideline", "claim_note"],
+        format_func=lambda v: v or "all documents",
+        key="lib_source_type",
+    )
+    try:
+        params = {"source_type": lib_source_type} if lib_source_type else {}
+        docs = httpx.get(f"{API}/documents", params=params, timeout=30).json()
+    except Exception as exc:
+        docs = []
+        st.error(f"couldn't load document list: {exc}")
+
+    if not docs:
+        st.caption("No indexed documents"
+                   + (f" of type '{lib_source_type}'" if lib_source_type else "") + ".")
+
+    type_icon = {"policy": "📋", "clinical_guideline": "🩺", "claim_note": "🗂️"}
+    for doc in docs:
+        icon = type_icon.get(doc.get("source_type"), "📄")
+        title = (f"{icon} {doc.get('doc_name') or doc['doc_id']} · "
+                 f"v{doc.get('doc_version')} · {doc.get('num_chunks')} chunks")
+        with st.expander(title):
+            st.caption(f"source_type: `{doc.get('source_type')}`"
+                      + (f" · effective: {doc['effective_date']}"
+                         if doc.get("effective_date") else "")
+                      + (f" · {doc['num_tables']} table(s)"
+                         if doc.get("num_tables") else ""))
+            if doc.get("sections"):
+                st.caption("Sections: " + ", ".join(doc["sections"]))
+
+            preview_key = f"show_preview_{doc['doc_id']}"
+            if st.button("👁️ Preview page 1", key=f"btn_{doc['doc_id']}"):
+                ss[preview_key] = not ss.get(preview_key, False)
+            if ss.get(preview_key):
+                try:
+                    st.image(f"{API}/documents/{doc['doc_id']}/preview",
+                             caption=doc.get("doc_name"))
+                except Exception:
+                    st.caption("Preview unavailable — non-PDF source, or the "
+                              "original file isn't retained on the server.")
+
 # ── main: chat ──────────────────────────────────────────────────────────────
 st.header("Ask the policy corpus")
 
