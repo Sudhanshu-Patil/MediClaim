@@ -162,27 +162,60 @@ def grounding(state: AgentState) -> dict:
         return {"grounding_checked": False, "grounding_score": None,
                 "ungrounded_sentences": []}
 
-    # Fragment fallback: a very short answer ("20%") is a degenerate NLI
-    # hypothesis, and the model often cites prose chunks while the value
-    # lives in the table. Verbatim containment in ANY retrieved chunk is the
-    # strongest grounding evidence available for fragments.
+    # Containment fallbacks check ALL retrieved chunks (not just cited): the
+    # model frequently cites prose while the evidence lives in the table.
+    # Chunks found this way are ADDED to citations (evidence augmentation),
+    # fixing the "right answer, wrong sources" pattern from manual testing.
     all_premises = [(c["chunk_id"], c["text"][:6000]) for c in chunks]
+    query = state.get("query", "")
+    query_tokens = {t for t in _normalize(query).split() if len(t) > 2}
+    evidence_ids: list[str] = []
+
+    def _fragment_evidence(sentence: str):
+        """Value-fragments ('20%', '1850') ground ONLY via a line that also
+        matches the query — a bare lexical hit anywhere is not evidence
+        (manual testing: 'Ear irrigation' shipped for an OP-9009 question
+        because the words existed elsewhere in the table). Requires a digit
+        so bare Yes/No can never containment-ground."""
+        if len(sentence.split()) > 5 or not re.search(r"[0-9]", sentence):
+            return None
+        norm = _normalize(sentence)
+        if not norm:
+            return None
+        for cid, text in all_premises:
+            for line in text.splitlines():
+                norm_line = _normalize(line)
+                if norm in norm_line and query_tokens & set(norm_line.split()):
+                    return cid
+        return None
+
+    def _verbatim_evidence(sentence: str):
+        """A full sentence appearing verbatim in any retrieved chunk is
+        grounded by construction (fixes false holds on exact quotes cited
+        against the wrong chunk)."""
+        norm = _normalize(sentence)
+        if len(sentence.split()) < 6 or not norm:
+            return None
+        for cid, text in all_premises:
+            if norm in _normalize(text):
+                return cid
+        return None
 
     ungrounded: list[str] = []
-    attributions: list[dict] = []  # which cited chunk grounds each sentence
+    attributions: list[dict] = []  # which chunk grounds each sentence
     for sentence in sentences:
         # Entailed if ANY cited chunk entails it (multi-source answers).
         scores = [_sentence_grounded_prob(sentence, p) for p in premises]
         best = max(scores)
         best_chunk = premise_ids[scores.index(best)]
-        if best < settings.entailment_threshold and len(sentence.split()) <= 5:
-            norm = _normalize(sentence)
-            for cid, text in all_premises:
-                if norm and norm in _normalize(text):
-                    best, best_chunk = 1.0, cid
-                    logger.info("Fragment %r grounded by containment in %s",
-                                sentence, cid)
-                    break
+        if best < settings.entailment_threshold:
+            evidence = _verbatim_evidence(sentence) or _fragment_evidence(sentence)
+            if evidence:
+                best, best_chunk = 1.0, evidence
+                if evidence not in cited_ids and evidence not in evidence_ids:
+                    evidence_ids.append(evidence)
+                logger.info("Sentence grounded by containment in %s: %r",
+                            evidence, sentence[:60])
         attributions.append({
             "sentence": sentence,
             "chunk_id": best_chunk if best >= settings.entailment_threshold else None,
@@ -200,9 +233,14 @@ def grounding(state: AgentState) -> dict:
         )
     else:
         logger.info("Grounding: all %d sentences entailed", len(sentences))
-    return {
+    result = {
         "grounding_checked": True,
         "grounding_score": score,
         "ungrounded_sentences": ungrounded,
         "sentence_attributions": attributions,
     }
+    if evidence_ids:
+        # Evidence augmentation: chunks that actually ground the answer join
+        # the citation list (they are retrieved chunks, valid by construction).
+        result["citations"] = list(state.get("citations", [])) + evidence_ids
+    return result

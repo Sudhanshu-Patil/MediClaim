@@ -77,13 +77,14 @@ def risk_gate(state: AgentState) -> dict:
     if _HIGH_RISK_RE.search(state.get("query", "")):
         reasons.append("high-risk query pattern")
 
-    # Uncited few-word guess ("Yes" to an ambiguous question): the person who
-    # can fix an ambiguous question is the USER, not a reviewer — route to a
-    # clarification response instead of burning HITL attention. Never applies
-    # to high-risk queries or anything with citations.
+    # Gated few-word non-numeric guess ("Yes"/"No" to an ambiguous question):
+    # the person who can fix an ambiguous question is the USER, not a
+    # reviewer — route to clarification instead of burning HITL attention.
+    # Numeric fragments ("1850") stay with review: those questions were
+    # specific, the model just answered tersely. Never for high-risk queries.
     answer = (state.get("answer") or "").strip()
-    if (reasons and not state.get("citations") and answer
-            and len(answer.split()) <= 3
+    if (reasons and answer and len(answer.split()) <= 3
+            and not re.search(r"[0-9]", answer)
             and not _HIGH_RISK_RE.search(state.get("query", ""))):
         return {"needs_review": False, "needs_clarification": True,
                 "review_reason": ""}
@@ -147,9 +148,12 @@ def finalize(state: AgentState) -> dict:
             "final_citations": [],
             "status": "rejected",
         }
-    # Strip citations that failed validation rather than shipping bad ones.
-    invalid = set(state.get("invalid_citations", []))
-    citations = [c for c in state.get("citations", []) if c not in invalid]
+    # Ship ONLY citations that resolve to actually-retrieved chunks — a
+    # hallucinated-but-well-formed id must never render as an empty source
+    # card ("None vNone" in manual testing).
+    retrieved_ids = {c["chunk_id"] for c in state.get("chunks", [])}
+    citations = [c for c in dict.fromkeys(state.get("citations", []))
+                 if c in retrieved_ids]
     # Output-side PII guard (README §10): source documents (claim notes) can
     # themselves contain member PII — never let it leave in an answer.
     from agent.nodes.input_guard import redact_pii

@@ -290,22 +290,38 @@ for idx, message in enumerate(ss.messages):
 if ss.pending_review:
     meta = ss.pending_review
     with st.container(border=True):
-        st.subheader("⏸️ Human review required")
-        st.caption(meta.get("review_reason") or "")
+        head_l, head_r = st.columns([3, 2])
+        head_l.subheader("⏸️ Needs your review")
+        reasons = [r.strip() for r in (meta.get("review_reason") or "").split(";") if r.strip()]
+        head_r.markdown(" ".join(f"`{r}`" for r in reasons) or "`verification incomplete`")
+
         draft = (meta.get("answer") or "").strip()
-        st.markdown("**Draft:** " + (md_safe(draft) if draft else
-                    "*(the model did not produce a usable answer — write one below "
-                    "and Send edited, or Reject)*"))
-        edited = st.text_area("Edit the answer (for verdict=edited)",
-                              value=meta.get("answer") or "")
-        note = st.text_input("Reviewer note")
-        c1, c2, c3 = st.columns(3)
+        if draft:
+            st.info(md_safe(draft))
+        else:
+            st.warning("The model did not produce a usable answer — write one "
+                       "under *Edit*, or Reject.")
+
+        cites = meta.get("citations") or []
+        if cites:
+            st.caption("Evidence retrieved: " + " · ".join(
+                f"{c.get('section_title') or c.get('doc_name')}"
+                + (f" p.{c['page_number']}" if c.get("page_number") else "")
+                for c in cites[:4]))
+
         verdict, payload = None, {}
-        if c1.button("✅ Approve"):
+        edited = draft
+        with st.expander("✏️ Edit before sending"):
+            edited = st.text_area("Corrected answer", value=draft,
+                                  label_visibility="collapsed")
+        note = st.text_input("Reviewer note (optional)",
+                             placeholder="why you approved / edited / rejected…")
+        c1, c2, c3 = st.columns(3)
+        if c1.button("✅ Approve", type="primary", use_container_width=True):
             verdict = "approved"
-        if c2.button("✏️ Send edited"):
+        if c2.button("✏️ Send edited", use_container_width=True):
             verdict, payload = "edited", {"answer": edited}
-        if c3.button("❌ Reject"):
+        if c3.button("❌ Reject", use_container_width=True):
             verdict = "rejected"
         if verdict:
             final = httpx.post(f"{API}/review/{meta['thread_id']}",

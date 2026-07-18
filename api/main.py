@@ -94,13 +94,19 @@ def _final_payload(state: dict, thread_id: str) -> dict:
     citations = [
         {
             "chunk_id": cid,
-            "doc_name": by_id.get(cid, {}).get("doc_name"),
-            "doc_version": by_id.get(cid, {}).get("doc_version"),
-            "section_title": by_id.get(cid, {}).get("section_title"),
-            "page_number": by_id.get(cid, {}).get("page_number"),
-            "has_bbox": bool(by_id.get(cid, {}).get("bbox")),
+            "doc_name": by_id[cid].get("doc_name"),
+            "doc_version": by_id[cid].get("doc_version"),
+            "section_title": by_id[cid].get("section_title"),
+            "page_number": by_id[cid].get("page_number"),
+            "has_bbox": bool(by_id[cid].get("bbox")),
         }
-        for cid in state.get("final_citations") or state.get("citations") or []
+        for cid in dict.fromkeys(
+            # An explicitly-empty final list means NO sources (clarifications,
+            # rejections) — only fall back to draft citations pre-finalize.
+            state["final_citations"] if state.get("status")
+            else (state.get("citations") or [])
+        )
+        if cid in by_id  # never render a source card with no metadata
     ]
     return {
         "thread_id": thread_id,

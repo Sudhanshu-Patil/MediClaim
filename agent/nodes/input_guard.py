@@ -32,7 +32,7 @@ _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("credit_card", re.compile(r"\b(?:\d[ -]?){13,16}\b")),
     ("email", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")),
     ("phone", re.compile(r"\b(?:\+?\d{1,3}[ -]?)?(?:\(\d{3}\)|\d{3})[ -]?\d{3}[ -]?\d{4}\b")),
-    ("member_id", re.compile(r"\b(?:member|policy|claim|subscriber)\s*(?:id|no|number|#)\s*[:#]?\s*[A-Z0-9-]{6,}\b", re.IGNORECASE)),
+    ("member_id", re.compile(r"\b(?:member|policy|claim|subscriber)\s*(?:id|no|number|#)\s*(?:is|was|[:#=])?\s*[A-Z0-9-]{6,}\b", re.IGNORECASE)),
     ("dob", re.compile(r"\b(?:dob|date\s+of\s+birth)\s*[:#]?\s*\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b", re.IGNORECASE)),
 ]
 
