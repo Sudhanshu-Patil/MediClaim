@@ -226,9 +226,3 @@ medclaim-agentic-rag/
 7. Run RAGAS evaluation before/after fine-tuning and before/after GraphRAG
 8. Build the custom MCP server + `resolve_reference` tool; deploy UI (HF free CPU Space or local + demo recording)
 9. Load-test ingestion at scale (synthetic 100k-doc corpus), verify freshness/supersede logic, add production hardening (circuit breaker, rate limiting, health checks)
-
----
-
-## 15. Resume-Ready Summary
-
-> Designed and built a production-shaped agentic claims-processing RAG system: QLoRA-fine-tuned Llama 3.1 8B deployed locally via Ollama; hybrid retrieval combining scoped GraphRAG (Neo4j) and Qdrant vector search with cross-encoder reranking, orchestrated via LangGraph with human-in-the-loop review and LLM-as-judge scoring; production-hardened with async Celery/Redis ingestion supporting ~100k documents, document-version-aware freshness handling, Docling-based parsing of complex multi-page tables, and structural citation grounding with line-level source highlighting; instrumented with LangSmith and self-hosted Langfuse; evaluated via RAGAS with measurable faithfulness/precision gains; extended with a custom MCP server for agentic cross-reference resolution and tool use. Entire stack runs at zero cost on local/open-source infrastructure.
