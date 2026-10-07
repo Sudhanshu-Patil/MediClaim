@@ -12,6 +12,9 @@ leaves them room (``l1:``/``l2:`` prefixes).
 
 Vectors are stored as raw little-endian float32 bytes (~3 KB for a 768-dim
 bge-base vector) — no JSON overhead.
+
+Failure policy: the cache is an optimisation, never a dependency. If Redis is
+unreachable, reads behave as cache misses and writes are skipped (fail-open).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import redis
+from redis.exceptions import RedisError
 
 from config import get_settings
 
@@ -30,10 +34,18 @@ _pools: dict[str, redis.ConnectionPool] = {}
 
 
 def get_redis(url: Optional[str] = None) -> redis.Redis:
-    """Pooled Redis client. decode_responses stays False — we store raw bytes."""
+    """Pooled Redis client. decode_responses stays False — we store raw bytes.
+
+    Short timeouts so an unreachable host fails fast instead of hanging a request.
+    """
     url = url or get_settings().redis_url
     if url not in _pools:
-        _pools[url] = redis.ConnectionPool.from_url(url, decode_responses=False)
+        _pools[url] = redis.ConnectionPool.from_url(
+            url,
+            decode_responses=False,
+            socket_connect_timeout=2,
+            socket_timeout=5,
+        )
     return redis.Redis(connection_pool=_pools[url])
 
 
@@ -61,10 +73,14 @@ class EmbeddingCache:
         return f"l3:emb:{self.model_name}:{chunk_hash}"
 
     def get_many(self, chunk_hashes: Sequence[str]) -> dict[str, list[float]]:
-        """Return {chunk_hash: vector} for every cache hit."""
+        """Return {chunk_hash: vector} for every cache hit (empty on Redis failure)."""
         if not chunk_hashes:
             return {}
-        raw = self.client.mget([self._key(h) for h in chunk_hashes])
+        try:
+            raw = self.client.mget([self._key(h) for h in chunk_hashes])
+        except RedisError as exc:
+            logger.warning("Redis unavailable; treating as cache miss (%s)", exc)
+            return {}
         hits: dict[str, list[float]] = {}
         for chunk_hash, blob in zip(chunk_hashes, raw):
             if blob is not None:
@@ -74,18 +90,24 @@ class EmbeddingCache:
     def set_many(self, vectors: dict[str, Iterable[float]]) -> None:
         if not vectors:
             return
-        pipe = self.client.pipeline(transaction=False)
-        for chunk_hash, vector in vectors.items():
-            blob = np.asarray(list(vector), dtype=np.float32).tobytes()
-            if self.ttl_seconds:
-                pipe.set(self._key(chunk_hash), blob, ex=self.ttl_seconds)
-            else:
-                pipe.set(self._key(chunk_hash), blob)
-        pipe.execute()
+        try:
+            pipe = self.client.pipeline(transaction=False)
+            for chunk_hash, vector in vectors.items():
+                blob = np.asarray(list(vector), dtype=np.float32).tobytes()
+                if self.ttl_seconds:
+                    pipe.set(self._key(chunk_hash), blob, ex=self.ttl_seconds)
+                else:
+                    pipe.set(self._key(chunk_hash), blob)
+            pipe.execute()
+        except RedisError as exc:
+            logger.warning("Redis unavailable; skipping cache write (%s)", exc)
 
     def stats(self) -> dict[str, int]:
         """Approximate entry count for this model's namespace (debug helper)."""
         count = 0
-        for _ in self.client.scan_iter(match=f"l3:emb:{self.model_name}:*", count=1000):
-            count += 1
+        try:
+            for _ in self.client.scan_iter(match=f"l3:emb:{self.model_name}:*", count=1000):
+                count += 1
+        except RedisError as exc:
+            logger.warning("Redis unavailable; stats unavailable (%s)", exc)
         return {"entries": count}
