@@ -217,7 +217,7 @@ class GroqClient:
             raise RuntimeError(
                 "GROQ_API_KEY not set — required when LLM_PROVIDER=groq"
             )
-        self.model = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        self.model = model or os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         self.timeout = timeout
         self._breaker = _CircuitBreaker(failure_threshold, cooldown_seconds)
 
