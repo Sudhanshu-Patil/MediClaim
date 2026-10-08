@@ -198,8 +198,8 @@ class GroqClient:
     Free-tier limits (console.groq.com/docs/rate-limits, verified at
     integration time): ~30 requests/min, model-dependent token/day caps —
     plenty for a low-traffic portfolio demo, tight for a load test. Model
-    catalog rotates; GROQ_MODEL defaults to a currently-available Llama
-    instruct model but is fully overridable via env without a code change.
+    catalog rotates; GROQ_MODEL defaults to a currently-available model but
+    is fully overridable via env without a code change.
     """
 
     BASE_URL = "https://api.groq.com/openai/v1"
@@ -225,6 +225,32 @@ class GroqClient:
         return {"Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"}
 
+    def _is_reasoning_model(self) -> bool:
+        return "gpt-oss" in self.model
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        json_mode: bool,
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+    ) -> dict:
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            # gpt-oss spends completion tokens on hidden reasoning, so a small
+            # cap truncates the JSON answer mid-generation.
+            "max_tokens": max(max_tokens, 1024) if self._is_reasoning_model() else max_tokens,
+            "stream": stream,
+        }
+        if self._is_reasoning_model():
+            payload["reasoning_effort"] = "low"
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
     def chat(
         self,
         messages: list[dict],
@@ -237,22 +263,23 @@ class GroqClient:
         @tracing.traced("groq-chat", as_type="generation")
         def _call() -> str:
             self._breaker.check(f"groq, model={self.model}")
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": False,
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
+            payload = self._build_payload(messages, json_mode, temperature,
+                                          max_tokens, stream=False)
             try:
                 response = httpx.post(
                     f"{self.BASE_URL}/chat/completions", json=payload,
                     headers=self._headers(), timeout=self.timeout,
                 )
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    self._breaker.record(ok=False)
+                    raise RuntimeError(
+                        f"Groq {response.status_code}: {response.text[:300]} "
+                        f"(model={self.model})"
+                    )
                 data = response.json()
+                if "error" in data or not data.get("choices"):
+                    self._breaker.record(ok=False)
+                    raise RuntimeError(f"Groq returned no choices: {str(data)[:300]}")
                 self._breaker.record(ok=True)
                 usage = data.get("usage", {})
                 tracing.update_generation(
@@ -276,28 +303,34 @@ class GroqClient:
         max_tokens: int = 1024,
     ):
         self._breaker.check(f"groq, model={self.model}")
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        payload = self._build_payload(messages, json_mode, temperature,
+                                      max_tokens, stream=True)
         try:
             with httpx.stream(
                 "POST", f"{self.BASE_URL}/chat/completions", json=payload,
                 headers=self._headers(), timeout=self.timeout,
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    response.read()
+                    self._breaker.record(ok=False)
+                    raise RuntimeError(
+                        f"Groq {response.status_code}: {response.text[:300]} "
+                        f"(model={self.model})"
+                    )
                 for line in response.iter_lines():
                     if not line or not line.startswith("data: "):
                         continue
                     raw = line[len("data: "):]
                     if raw.strip() == "[DONE]":
                         break
-                    delta = _json.loads(raw)["choices"][0].get("delta", {}).get("content")
+                    obj = _json.loads(raw)
+                    if "error" in obj:
+                        self._breaker.record(ok=False)
+                        raise RuntimeError(f"Groq stream error: {obj['error']}")
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {}).get("content")
                     if delta:
                         yield delta
             self._breaker.record(ok=True)
