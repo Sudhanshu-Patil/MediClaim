@@ -1,6 +1,6 @@
 # RUNME — Phase 1: Infrastructure + Document Ingestion Pipeline
 
-This phase delivers the Docker stack (Qdrant, Neo4j, Redis, Langfuse) and the
+This phase delivers the Docker stack (Qdrant, Neo4j, Redis) and the
 async ingestion pipeline: Docling parse → version check → hierarchical chunk →
 metadata → cross-reference edges → L3-cached embedding → Qdrant + Neo4j upsert.
 
@@ -24,10 +24,9 @@ docker compose ps           # wait until every service is "healthy"
 | Qdrant   | http://localhost:6333/dashboard | vector store                          |
 | Neo4j    | http://localhost:7474   | login `neo4j` / your `NEO4J_PASSWORD`        |
 | Redis    | localhost:6379          | L3 embedding cache + Celery broker           |
-| Langfuse | http://localhost:3000   | create an account + project on first visit; put the project keys in `.env` (used from Phase 4) |
 
-> Langfuse runs as **v2** (single container + Postgres). v3 additionally
-> requires ClickHouse/MinIO/worker containers; swap in later if needed.
+> Tracing uses **Langfuse Cloud** (not Docker): put the project's API keys
+> and `LANGFUSE_BASE_URL` in `.env` (used from Phase 4, see §10).
 
 ## 2. Install Python dependencies
 
@@ -206,22 +205,25 @@ of stacking timeouts, README §12).
 
 ## 10. Observability (roadmap step 6 — Langfuse + LangSmith)
 
-With `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` in `.env` (project settings
-at http://localhost:3000), every `scripts/ask.py` run emits one
-`medclaim-agent` trace to the self-hosted Langfuse: a span per graph node,
-each Ollama call as a GENERATION with real token counts, and two trace
-scores — `judge_score` and `citation_validation`. Without keys everything
-no-ops (zero overhead, no code paths change).
+With `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_BASE_URL` in `.env`
+(Langfuse Cloud → project settings → API keys), every question — from
+`scripts/ask.py` or the API's `/ask` and `/review` — emits one
+`medclaim-agent` trace: a root span with the question as input and the
+answer as output, a span per graph node, each LLM call as a GENERATION with
+real token counts, and trace scores `judge_score`, `citation_validation` and
+`grounding_score`. The chat thread id is propagated as the Langfuse
+**session**, so a whole conversation (incl. its HITL review) groups together.
+Without keys everything no-ops (zero overhead, no code paths change).
 
-Browse traces in the Langfuse UI, or via API:
+Browse traces in the Langfuse UI, or via the CLI (observations API — the
+legacy `GET /api/public/traces` endpoint is deprecated in Langfuse v4):
 
 ```bash
-curl -u $LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY \
-  "http://localhost:3000/api/public/traces?limit=5"
+npx langfuse-cli api observations list --limit 5
 ```
 
-Version note: the self-hosted server is Langfuse **v2**, so the pinned SDK is
-`langfuse<3` (the v3 SDK only speaks to v3 servers).
+Version note: the SDK is pinned to **v4** (`langfuse>=4.7,<5`,
+OpenTelemetry-based); Langfuse Cloud requires >=4.7 for v4 ingestion.
 
 LangSmith (dev-time tracing) is zero-code: uncomment `LANGCHAIN_TRACING_V2`,
 `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` in `.env` and LangGraph traces

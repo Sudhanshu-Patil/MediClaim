@@ -251,51 +251,55 @@ def build_graph(checkpointer=None):
     return graph.compile(checkpointer=checkpointer or _make_checkpointer())
 
 
+def record_outcome(state: dict, interrupted: bool) -> None:
+    """Root-span output/metadata + trace scores. Call inside tracing.root_span
+    after the graph returns (shared by the CLI and the API)."""
+    from observability import tracing
+
+    tracing.update_root(
+        output=state.get("answer"),
+        metadata={
+            "route": state.get("route"),
+            "status": state.get("status"),
+            "needs_review": state.get("needs_review"),
+            "interrupted": interrupted,
+            "n_chunks": len(state.get("chunks", [])),
+        },
+    )
+    if state.get("judge_score") is not None:
+        tracing.score_trace(
+            "judge_score", float(state["judge_score"]),
+            comment=state.get("judge_reason"),
+        )
+    if state.get("validation_passed") is not None:
+        tracing.score_trace(
+            "citation_validation", 1.0 if state["validation_passed"] else 0.0
+        )
+    if state.get("grounding_score") is not None:
+        tracing.score_trace(
+            "grounding_score", float(state["grounding_score"]),
+            comment=("; ".join(state.get("ungrounded_sentences", []))[:200] or None),
+        )
+
+
 def run_agent(app, payload, config) -> dict:
     """Invoke the graph under one root Langfuse trace (README §11).
 
-    Wraps app.invoke so every node span and LLM generation nests under a
-    single "medclaim-agent" trace, attaches route/status metadata, records
-    the judge score as a trace score, and flushes the batch queue (required
-    in short-lived CLI processes). Identical to app.invoke when tracing is
-    off.
+    Every node span and LLM generation nests under a single "medclaim-agent"
+    root, with the thread id propagated as the Langfuse session id; route/
+    status metadata and judge/validation/grounding scores are attached, and
+    the export queue is flushed (required in short-lived CLI processes).
+    Identical to app.invoke when tracing is off.
     """
     from observability import tracing
 
-    if not tracing.enabled():
-        return app.invoke(payload, config)
-
-    @tracing.traced("medclaim-agent")
-    def _run() -> dict:
-        state = app.invoke(payload, config)
-        tracing.update_trace(
-            metadata={
-                "thread_id": config.get("configurable", {}).get("thread_id"),
-                "route": state.get("route"),
-                "status": state.get("status"),
-                "needs_review": state.get("needs_review"),
-                "interrupted": "__interrupt__" in state,
-                "n_chunks": len(state.get("chunks", [])),
-            },
-            tags=["agent"],
-        )
-        if state.get("judge_score") is not None:
-            tracing.score_trace(
-                "judge_score", float(state["judge_score"]),
-                comment=state.get("judge_reason"),
-            )
-        if state.get("validation_passed") is not None:
-            tracing.score_trace(
-                "citation_validation", 1.0 if state["validation_passed"] else 0.0
-            )
-        if state.get("grounding_score") is not None:
-            tracing.score_trace(
-                "grounding_score", float(state["grounding_score"]),
-                comment=("; ".join(state.get("ungrounded_sentences", []))[:200] or None),
-            )
-        return state
-
+    thread_id = config.get("configurable", {}).get("thread_id")
+    query = payload.get("query") if isinstance(payload, dict) else None
     try:
-        return _run()
+        with tracing.root_span("medclaim-agent", session_id=thread_id,
+                               tags=["agent"], input=query):
+            state = app.invoke(payload, config)
+            record_outcome(state, interrupted="__interrupt__" in state)
+            return state
     finally:
         tracing.flush()

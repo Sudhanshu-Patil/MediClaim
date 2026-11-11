@@ -22,6 +22,7 @@ Rate-limited with slowapi (README §12). Run:
 
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import logging
@@ -138,6 +139,9 @@ def _final_payload(state: dict, thread_id: str) -> dict:
 @limiter.limit("10/minute")
 def ask(request: Request, body: AskBody):
     """Stream the pipeline: token events live, then result/review."""
+    from agent.graph import record_outcome
+    from observability import tracing
+
     thread_id = body.thread_id or uuid.uuid4().hex[:12]
     config = {"configurable": {"thread_id": thread_id}}
     graph = get_graph()
@@ -145,18 +149,22 @@ def ask(request: Request, body: AskBody):
     def event_stream():
         yield _sse("start", {"thread_id": thread_id})
         try:
-            for mode, chunk in graph.stream(
-                {"query": body.query, "source_type": body.source_type},
-                config, stream_mode=["custom", "updates"],
-            ):
-                if mode == "custom" and isinstance(chunk, dict) and "token" in chunk:
-                    yield _sse("token", {"t": chunk["token"]})
-                elif mode == "updates" and isinstance(chunk, dict):
-                    for node in chunk:
-                        if node != "__interrupt__":
-                            yield _sse("status", {"node": node})
-            state = graph.get_state(config).values
-            if graph.get_state(config).next:  # paused at the HITL interrupt
+            with tracing.root_span("medclaim-agent", session_id=thread_id,
+                                   tags=["agent", "api"], input=body.query):
+                for mode, chunk in graph.stream(
+                    {"query": body.query, "source_type": body.source_type},
+                    config, stream_mode=["custom", "updates"],
+                ):
+                    if mode == "custom" and isinstance(chunk, dict) and "token" in chunk:
+                        yield _sse("token", {"t": chunk["token"]})
+                    elif mode == "updates" and isinstance(chunk, dict):
+                        for node in chunk:
+                            if node != "__interrupt__":
+                                yield _sse("status", {"node": node})
+                snapshot = graph.get_state(config)
+                state = snapshot.values
+                record_outcome(state, interrupted=bool(snapshot.next))
+            if snapshot.next:  # paused at the HITL interrupt
                 yield _sse("review", {
                     **_final_payload(state, thread_id),
                     "review_reason": state.get("review_reason"),
@@ -167,8 +175,27 @@ def ask(request: Request, body: AskBody):
             logger.exception("ask stream failed")
             yield _sse("error", {"detail": str(exc)})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream",
+    return StreamingResponse(_one_context(event_stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache"})
+
+
+def _one_context(gen):
+    """Step a sync generator inside ONE contextvars.Context.
+
+    Starlette advances a sync generator in a fresh context per item, so the
+    OpenTelemetry context set by tracing.root_span would not be the one
+    restored when the generator finishes (ValueError on detach, orphaned
+    spans)."""
+    ctx = contextvars.copy_context()
+    try:
+        while True:
+            try:
+                item = ctx.run(next, gen)
+            except StopIteration:
+                return
+            yield item
+    finally:  # client disconnect: close the inner generator in its own context
+        ctx.run(gen.close)
 
 
 # ── HITL review ─────────────────────────────────────────────────────────────
@@ -189,11 +216,17 @@ def review(request: Request, thread_id: str, body: ReviewBody):
     config = {"configurable": {"thread_id": thread_id}}
     if not graph.get_state(config).next:
         raise HTTPException(404, f"thread {thread_id} has no pending review")
-    state = graph.invoke(
-        Command(resume={"verdict": body.verdict, "answer": body.answer,
-                        "note": body.note}),
-        config,
-    )
+    from agent.graph import record_outcome
+    from observability import tracing
+
+    with tracing.root_span("medclaim-review", session_id=thread_id,
+                           tags=["agent", "api", "hitl"], input=body.verdict):
+        state = graph.invoke(
+            Command(resume={"verdict": body.verdict, "answer": body.answer,
+                            "note": body.note}),
+            config,
+        )
+        record_outcome(state, interrupted=False)
     return _final_payload(state, thread_id)
 
 

@@ -69,7 +69,8 @@ services:
       - key: REDIS_URL
         sync: false
 
-      # Optional: self-hosted Langfuse or Langfuse Cloud, for live traces
+      # Optional: Langfuse Cloud traces (v4 SDK). LANGFUSE_HOST, e.g.
+      # https://us.cloud.langfuse.com (LANGFUSE_BASE_URL also works)
       - key: LANGFUSE_PUBLIC_KEY
         sync: false
       - key: LANGFUSE_SECRET_KEY

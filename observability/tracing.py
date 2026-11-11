@@ -1,15 +1,16 @@
 """Langfuse tracing layer (roadmap step 6, README §11) — graceful no-op.
 
-Wraps the Langfuse v2 SDK's ``@observe`` decorators behind functions that
-degrade to identity/no-ops whenever tracing is off, so agent code never
-imports langfuse directly and never breaks without keys.
+Wraps the Langfuse v4 SDK (``langfuse>=4.7,<5``, OpenTelemetry-based) behind
+functions that degrade to identity/no-ops whenever tracing is off, so agent
+code never imports langfuse directly and never breaks without keys.
 
 Enabled iff LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set (and the SDK is
-importable). Host defaults to the self-hosted instance at localhost:3000.
+importable). Target host comes from LANGFUSE_BASE_URL (LANGFUSE_HOST is still
+honored); this project uses Langfuse Cloud (US: https://us.cloud.langfuse.com).
 
-Server compatibility: the self-hosted Langfuse in docker-compose is v2 →
-requires the v2 SDK (``langfuse>=2.53,<3``). The v3 SDK speaks OTel to v3
-servers only.
+v4 model: trace-level attributes (session, tags, trace name) no longer get set
+after the fact — they are *propagated* onto every observation created inside
+``root_span``, so they must be established before the graph runs.
 
 LangSmith (dev-time tracing, README §11) needs no code at all: LangGraph
 traces itself when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
@@ -17,9 +18,10 @@ traces itself when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +37,18 @@ def enabled() -> bool:
         if not has_keys:
             _ENABLED = False
         else:
-            os.environ.setdefault("LANGFUSE_HOST", "http://localhost:3000")
             try:
-                from langfuse.decorators import observe  # noqa: F401
+                from langfuse import get_client
 
+                get_client()
                 _ENABLED = True
-                logger.info("Langfuse tracing enabled (%s)", os.environ["LANGFUSE_HOST"])
-            except ImportError:
+                logger.info("Langfuse tracing enabled (%s)",
+                            os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST")
+                            or "SDK default host")
+            except Exception:  # ImportError, or a broken OpenTelemetry install
                 _ENABLED = False
-                logger.warning("LANGFUSE keys set but SDK missing; tracing disabled")
+                logger.warning("LANGFUSE keys set but SDK unusable; tracing disabled",
+                               exc_info=True)
     return _ENABLED
 
 
@@ -53,7 +58,7 @@ def traced(name: str, as_type: Optional[str] = None) -> Callable:
     def decorator(fn: Callable) -> Callable:
         if not enabled():
             return fn
-        from langfuse.decorators import observe
+        from langfuse import observe
 
         if as_type == "generation":
             return observe(name=name, as_type="generation")(fn)
@@ -62,41 +67,61 @@ def traced(name: str, as_type: Optional[str] = None) -> Callable:
     return decorator
 
 
+@contextlib.contextmanager
+def root_span(name: str, session_id: Optional[str] = None,
+              tags: Optional[list[str]] = None, input: Any = None) -> Iterator[None]:
+    """One root observation per request; session/tags/trace name propagate to
+    every child (node spans, LLM generations) created inside the block."""
+    if not enabled():
+        yield
+        return
+    from langfuse import get_client, propagate_attributes
+    from opentelemetry import context as otel_context
+
+    # Detach from any ambient span (FastAPI's built-in request telemetry): v4
+    # doesn't export those, so our root would point at a parent Langfuse never
+    # receives. An empty context makes this a true trace root.
+    token = otel_context.attach(otel_context.Context())
+    try:
+        with propagate_attributes(trace_name=name, tags=tags,
+                                  session_id=str(session_id)[:200] if session_id else None):
+            with get_client().start_as_current_observation(as_type="span", name=name,
+                                                           input=input):
+                yield
+    finally:
+        otel_context.detach(token)
+
+
+def update_root(output: Any = None, metadata: Optional[dict] = None) -> None:
+    """Set output/metadata on the current (root) span — call inside root_span
+    after the graph returns, when route/status are known."""
+    if not enabled():
+        return
+    try:
+        from langfuse import get_client
+
+        get_client().update_current_span(output=output, metadata=metadata)
+    except Exception:  # tracing must never take the pipeline down
+        logger.debug("update_root failed", exc_info=True)
+
+
 def update_generation(model: str, usage: Optional[dict] = None,
                       metadata: Optional[dict] = None) -> None:
     """Attach model + token usage to the current generation observation."""
     if not enabled():
         return
     try:
-        from langfuse.decorators import langfuse_context
+        from langfuse import get_client
 
         kwargs: dict[str, Any] = {"model": model}
-        if usage and any(v for v in usage.values()):
-            kwargs["usage"] = usage
+        usage_details = {k: int(v) for k, v in (usage or {}).items() if v}
+        if usage_details:
+            kwargs["usage_details"] = usage_details
         if metadata:
             kwargs["metadata"] = metadata
-        langfuse_context.update_current_observation(**kwargs)
-    except Exception:  # tracing must never take the pipeline down
-        logger.debug("update_generation failed", exc_info=True)
-
-
-def update_trace(name: Optional[str] = None, metadata: Optional[dict] = None,
-                 tags: Optional[list[str]] = None) -> None:
-    if not enabled():
-        return
-    try:
-        from langfuse.decorators import langfuse_context
-
-        kwargs: dict[str, Any] = {}
-        if name:
-            kwargs["name"] = name
-        if metadata:
-            kwargs["metadata"] = metadata
-        if tags:
-            kwargs["tags"] = tags
-        langfuse_context.update_current_trace(**kwargs)
+        get_client().update_current_generation(**kwargs)
     except Exception:
-        logger.debug("update_trace failed", exc_info=True)
+        logger.debug("update_generation failed", exc_info=True)
 
 
 def score_trace(name: str, value: float, comment: Optional[str] = None) -> None:
@@ -104,20 +129,20 @@ def score_trace(name: str, value: float, comment: Optional[str] = None) -> None:
     if not enabled():
         return
     try:
-        from langfuse.decorators import langfuse_context
+        from langfuse import get_client
 
-        langfuse_context.score_current_trace(name=name, value=value, comment=comment)
+        get_client().score_current_trace(name=name, value=value, comment=comment)
     except Exception:
         logger.debug("score_trace failed", exc_info=True)
 
 
 def flush() -> None:
-    """Drain the batch queue — REQUIRED before short-lived CLIs exit."""
+    """Drain the export queue — REQUIRED before short-lived CLIs exit."""
     if not enabled():
         return
     try:
-        from langfuse.decorators import langfuse_context
+        from langfuse import get_client
 
-        langfuse_context.flush()
+        get_client().flush()
     except Exception:
         logger.debug("flush failed", exc_info=True)
